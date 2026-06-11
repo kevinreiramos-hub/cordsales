@@ -40,42 +40,46 @@ st.set_page_config(page_title="Cord Chemicals Field Sales", layout="wide")
 # ---- Modern, professional theme (adapts to Light/Dark; fonts left untouched) ----
 st.markdown("""
 <style>
-:root { --cord-accent: #8E24AA; }
+:root {
+    --cord-navy: #0A2A66;
+    --cord-navy2: #143C8C;
+    --cord-yellow: #FFC400;
+}
 
 /* Buttons — neutral text inherits the theme so it stays visible in light & dark */
 .stButton > button {
     border-radius: 12px;
-    border: 1px solid rgba(142,36,170,0.35);
+    border: 1px solid rgba(10,42,102,0.35);
     padding: 0.5rem 1rem;
     font-weight: 600;
     transition: all .15s ease;
 }
 .stButton > button:hover {
-    border-color: var(--cord-accent);
-    box-shadow: 0 4px 14px rgba(142,36,170,0.22);
+    border-color: var(--cord-yellow);
+    box-shadow: 0 4px 14px rgba(10,42,102,0.25);
     transform: translateY(-1px);
 }
 .stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #6A1B9A 0%, #8E24AA 100%);
-    border: none; color: #ffffff;
+    background: linear-gradient(135deg, #0A2A66 0%, #143C8C 100%);
+    border: 1px solid var(--cord-yellow); color: #ffffff;
 }
 
 /* Metric cards — translucent so they work on any theme background */
 [data-testid="stMetric"] {
-    background: rgba(142,36,170,0.06);
-    border: 1px solid rgba(142,36,170,0.20);
+    background: rgba(10,42,102,0.06);
+    border: 1px solid rgba(255,196,0,0.55);
     border-radius: 16px;
     padding: 16px 18px;
 }
-[data-testid="stMetricValue"] { color: var(--cord-accent); }
+[data-testid="stMetricValue"] { color: var(--cord-navy); }
 
 /* Bordered containers as soft cards */
 [data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 16px !important;
 }
 
-/* Sidebar — keep a subtle divider, no forced colors */
-[data-testid="stSidebar"] { border-right: 1px solid rgba(142,36,170,0.18); }
+/* Sidebar — yellow divider accent */
+[data-testid="stSidebar"] { border-right: 3px solid var(--cord-yellow); }
 
 h1, h2, h3 { letter-spacing: .2px; }
 [data-baseweb="input"] input, [data-baseweb="select"] { border-radius: 10px; }
@@ -93,21 +97,21 @@ def show_splash():
     .cordai-splash {
         position: fixed; inset: 0; z-index: 99999;
         display: flex; flex-direction: column; align-items: center; justify-content: center;
-        background: radial-gradient(1200px 600px at 50% 40%, #241b3a 0%, #120c20 60%, #0b0716 100%);
+        background: radial-gradient(1200px 600px at 50% 40%, #0c2f73 0%, #08214f 60%, #05132e 100%);
         animation: cordFade 3.4s ease forwards;
     }
     .cordai-glow {
         position: absolute; width: 520px; height: 520px; border-radius: 50%;
-        background: radial-gradient(circle, rgba(142,36,170,0.55) 0%, rgba(106,27,154,0.15) 45%, transparent 70%);
+        background: radial-gradient(circle, rgba(255,196,0,0.45) 0%, rgba(255,196,0,0.12) 45%, transparent 70%);
         filter: blur(20px); animation: cordPulse 2.2s ease-in-out infinite;
     }
     .cordai-brand {
         position: relative; color: #fff; font-size: 4.2rem; font-weight: 800;
         letter-spacing: 4px; opacity: 0; animation: cordBrand 3.4s ease forwards;
-        text-shadow: 0 0 24px rgba(142,36,170,0.8), 0 0 60px rgba(106,27,154,0.5);
+        text-shadow: 0 0 24px rgba(255,196,0,0.85), 0 0 60px rgba(255,196,0,0.5);
     }
-    .cordai-brand span { color: #CE93D8; }
-    .cordai-status { position: relative; margin-top: 26px; height: 24px; color: #cbb8e6; opacity: .9; }
+    .cordai-brand span { color: #FFC400; }
+    .cordai-status { position: relative; margin-top: 26px; height: 24px; color: #cfe0ff; opacity: .9; }
     .cordai-status div { position: absolute; left: 50%; transform: translateX(-50%);
         white-space: nowrap; opacity: 0; }
     .cordai-status .s1 { animation: cordLine 3.4s ease forwards 0.2s; }
@@ -117,7 +121,7 @@ def show_splash():
     .cordai-bar { position: relative; margin-top: 40px; width: 240px; height: 4px;
         border-radius: 4px; background: rgba(255,255,255,0.12); overflow: hidden; }
     .cordai-bar::after { content:""; position:absolute; inset:0; width:0;
-        background: linear-gradient(90deg,#8E24AA,#CE93D8); animation: cordBar 3.0s ease forwards; }
+        background: linear-gradient(90deg,#143C8C,#FFC400); animation: cordBar 3.0s ease forwards; }
     @keyframes cordPulse { 0%,100%{transform:scale(0.9);opacity:.7;} 50%{transform:scale(1.1);opacity:1;} }
     @keyframes cordBrand { 0%{opacity:0;transform:scale(0.92);} 25%{opacity:1;transform:scale(1);}
         85%{opacity:1;} 100%{opacity:0;} }
@@ -696,7 +700,7 @@ def build_route_map(full_seq, current_idx, token, map_height, open_route=False, 
         if not pts:
             pts = [[a["lat"], a["lng"]], [b["lat"], b["lng"]]]
         all_pts.extend(pts)
-        folium.PolyLine(pts, color="#6A1B9A" if active else "#9E86C9",
+        folium.PolyLine(pts, color="#0A2A66" if active else "#7C93C9",
                         weight=6 if active else 4, opacity=0.9 if active else 0.55,
                         dash_array="1,8").add_to(m)   # dotted = footpath
         last = (i == len(full_seq) - 1)
@@ -747,10 +751,10 @@ def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None,
 
     with c_text:
         if (not open_route) and cur == last_pos:
-            st.markdown(f"<h3 style='text-align:center;color:#6A1B9A;'>🏁 Back to Base: {dest['name']}</h3>",
+            st.markdown(f"<h3 style='text-align:center;color:#0A2A66;'>🏁 Back to Base: {dest['name']}</h3>",
                         unsafe_allow_html=True)
         else:
-            st.markdown(f"<h3 style='text-align:center;color:#6A1B9A;'>Stop {cur} of {num_stops}: {dest['name']}</h3>",
+            st.markdown(f"<h3 style='text-align:center;color:#0A2A66;'>Stop {cur} of {num_stops}: {dest['name']}</h3>",
                         unsafe_allow_html=True)
             rmk = remarks_map.get(dest["name"], "")
             if rmk:
