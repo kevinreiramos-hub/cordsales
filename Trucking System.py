@@ -13,6 +13,7 @@ import json
 import math
 import base64
 import time
+import re
 from datetime import date, datetime
 from streamlit_folium import st_folium
 from ortools.constraint_solver import routing_enums_pb2
@@ -822,6 +823,8 @@ def admin_page():
         admin_itinerary()
     elif view == "tracking":
         admin_tracking()
+    elif view == "chat":
+        admin_chat()
     else:
         admin_welcome()
 
@@ -830,7 +833,7 @@ def admin_welcome():
     st.title(f"👋 Welcome, {USER['name']}")
     st.markdown("#### What would you like to work on?")
     st.write("")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         with st.container(border=True):
             st.markdown("### 🧭 Plan & Assign Itineraries")
@@ -844,6 +847,13 @@ def admin_welcome():
             st.caption("See where a sales person is right now and their progress through the day.")
             if st.button("Open Live Tracking", type="primary", use_container_width=True, key="go_track"):
                 st.session_state.admin_view = "tracking"
+                st.rerun()
+    with c3:
+        with st.container(border=True):
+            st.markdown("### 🤖 CORD AI Assistant")
+            st.caption("Just tell it what to do, e.g. “Give 2 Manila to Alex.” It plans from the rep's location.")
+            if st.button("Open CORD AI", type="primary", use_container_width=True, key="go_chat"):
+                st.session_state.admin_view = "chat"
                 st.rerun()
 
 
@@ -1042,7 +1052,152 @@ def admin_tracking():
 
 
 # =============================================================================
-# 7. SALES PERSON DASHBOARD
+# 7. CORD AI CHAT (natural-language itinerary assistant)
+# =============================================================================
+def _parse_count(text):
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+             "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+    m = re.search(r"\b(\d+)\b", text)
+    if m:
+        return int(m.group(1))
+    for w, n in words.items():
+        if re.search(rf"\b{w}\b", text.lower()):
+            return n
+    return None
+
+
+def process_command(text):
+    """Interpret a command like 'Give 2 Manila to Alex' and propose an itinerary.
+    Returns (reply_text, proposal_or_None)."""
+    territories = list(dict.fromkeys(ACCOUNTS["Territory"].tolist()))
+
+    person = None
+    for name in SALESPERSONS:
+        if name.split()[0].lower() in text.lower() or name.lower() in text.lower():
+            person = name
+            break
+    terr = next((t for t in territories if t.lower() in text.lower()), None)
+    n = _parse_count(text)
+
+    if not person:
+        return ("Which sales person? For example: *“Give 2 Manila to Alex”*. "
+                f"Options: {', '.join(SALESPERSONS)}.", None)
+    if not terr:
+        return (f"Which territory should I use for {person.split()[0]}? "
+                f"Options: {', '.join(territories)}.", None)
+    n = n or 1
+
+    # Step 1 — find the rep's live location first
+    loc = get_location(person)
+    if loc:
+        origin = (loc["lat"], loc["lng"])
+        origin_name = f"📍 {person} (current location)"
+        origin_desc = f"**{person}** is at {loc['lat']:.4f}, {loc['lng']:.4f}"
+    else:
+        origin = (DEPOT_LAT, DEPOT_LNG)
+        origin_name = f"{DEPOT_NAME} (base)"
+        origin_desc = (f"I don't have a live GPS fix for **{person}** yet, so I planned from the base "
+                       f"(**{DEPOT_NAME}**). Ask them to open their app and share location for a location-based plan")
+
+    # Step 2 — candidates in that territory, nearest to the origin
+    cands = ACCOUNTS[ACCOUNTS["Territory"].str.lower() == terr.lower()].copy()
+    if cands.empty:
+        return (f"There are no accounts in **{terr}**.", None)
+    cands["dist"] = [haversine_m(origin[0], origin[1], r["Latitude"], r["Longitude"])
+                     for _, r in cands.iterrows()]
+    cands = cands.sort_values("dist")
+    if len(cands) < n:
+        note = f"Only {len(cands)} account(s) exist in {terr}, so I used all of them. "
+        n = len(cands)
+    else:
+        note = ""
+    chosen = cands.head(n)
+
+    # Step 3 — optimize the walking order from the rep's location
+    pts = [origin] + [(r["Latitude"], r["Longitude"]) for _, r in chosen.iterrows()]
+    res = optimize_open_route(pts, "time", DEFAULT_MAPBOX_TOKEN, 3)
+    order = res["order"] if res else list(range(len(pts)))
+    ordered = []
+    for ip in order:
+        if ip == 0:
+            continue
+        r = chosen.iloc[ip - 1]
+        ordered.append({"name": r["Account Name"], "lat": float(r["Latitude"]),
+                        "lng": float(r["Longitude"]), "address": r["Address"]})
+    durs, dists = res["durations"], res["distances"]
+    tot_t = sum(durs[x][y] for x, y in zip(order[:-1], order[1:]))
+    tot_d = sum(dists[x][y] for x, y in zip(order[:-1], order[1:]))
+
+    lines = [f"{origin_desc}.", f"\nNearest **{n}** {terr} account(s):"]
+    for _, r in chosen.iterrows():
+        lines.append(f"- **{r['Account Name']}** — {r['dist'] / 1000:.1f} km away")
+    lines.append(f"\nOptimized walking route: **{tot_d / 1000:.1f} km · ~{fmt_duration(tot_t)}**.")
+    lines.append(f"{note}Review the map below and assign it to {person.split()[0]} if it looks good.")
+
+    proposal = {"salesperson": person, "origin": origin, "origin_name": origin_name,
+                "ordered": ordered, "total_km": tot_d / 1000.0, "time_str": fmt_duration(tot_t)}
+    return ("\n".join(lines), proposal)
+
+
+def admin_chat():
+    if st.button("⬅️ Back to menu", key="back_chat"):
+        st.session_state.admin_view = None
+        st.rerun()
+    st.title("🤖 CORD AI Assistant")
+    st.caption('Try: “Give 2 Manila to Alex”, “Assign 3 Quezon City to Ritchel”, '
+               '“Send Jomer 1 Caloocan”.')
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    for role, msg in st.session_state.chat_history:
+        with st.chat_message(role):
+            st.markdown(msg)
+
+    prompt = st.chat_input("Type a command…")
+    if prompt:
+        st.session_state.chat_history.append(("user", prompt))
+        reply, proposal = process_command(prompt)
+        st.session_state.chat_history.append(("assistant", reply))
+        st.session_state.chat_proposal = proposal
+        st.rerun()
+
+    proposal = st.session_state.get("chat_proposal")
+    if proposal:
+        st.divider()
+        st.subheader(f"📝 Proposed itinerary for {proposal['salesperson']}")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Stops", len(proposal["ordered"]))
+        m2.metric("Walking distance", f"{proposal['total_km']:.1f} km")
+        m3.metric("Est. walking time", proposal["time_str"])
+
+        full_seq = [{"name": proposal["origin_name"], "lat": proposal["origin"][0],
+                     "lng": proposal["origin"][1]}]
+        for s in proposal["ordered"]:
+            full_seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
+        cmap = build_route_map(full_seq, len(full_seq) - 1, DEFAULT_MAPBOX_TOKEN, 460,
+                               open_route=True, highlight_idx=1)
+        st_folium(cmap, width=None, height=460, use_container_width=True,
+                  key="chat_map", returned_objects=[])
+
+        c1, c2 = st.columns(2)
+        if c1.button(f"✅ Assign to {proposal['salesperson']}", type="primary", use_container_width=True):
+            stops_payload = [{"name": s["name"], "lat": s["lat"], "lng": s["lng"],
+                              "remarks": "", "visited": False, "arrived_at": None,
+                              "departed_at": None, "travel_secs": None} for s in proposal["ordered"]]
+            aid = create_assignment(proposal["salesperson"], stops_payload,
+                                    proposal["total_km"], proposal["time_str"], USER["name"])
+            st.session_state.chat_history.append(
+                ("assistant", f"✅ Assigned to **{proposal['salesperson']}** (itinerary #{aid})."))
+            st.session_state.chat_proposal = None
+            st.rerun()
+        if c2.button("❌ Discard", use_container_width=True):
+            st.session_state.chat_proposal = None
+            st.rerun()
+
+
+# =============================================================================
+# 8. SALES PERSON DASHBOARD
 # =============================================================================
 def sales_page():
     st.title(f"🚶 {USER['name']} — My Itinerary")
