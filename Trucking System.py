@@ -43,7 +43,6 @@ st.markdown("""
 :root {
     --cord-navy: #0A2A66;
     --cord-navy2: #143C8C;
-    --cord-yellow: #FFC400;
 }
 
 /* Buttons — neutral text inherits the theme so it stays visible in light & dark */
@@ -55,19 +54,19 @@ st.markdown("""
     transition: all .15s ease;
 }
 .stButton > button:hover {
-    border-color: var(--cord-yellow);
+    border-color: var(--cord-navy);
     box-shadow: 0 4px 14px rgba(10,42,102,0.25);
     transform: translateY(-1px);
 }
 .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #0A2A66 0%, #143C8C 100%);
-    border: 1px solid var(--cord-yellow); color: #ffffff;
+    border: none; color: #ffffff;
 }
 
 /* Metric cards — translucent so they work on any theme background */
 [data-testid="stMetric"] {
     background: rgba(10,42,102,0.06);
-    border: 1px solid rgba(255,196,0,0.55);
+    border: 1px solid rgba(10,42,102,0.25);
     border-radius: 16px;
     padding: 16px 18px;
 }
@@ -78,8 +77,8 @@ st.markdown("""
     border-radius: 16px !important;
 }
 
-/* Sidebar — yellow divider accent */
-[data-testid="stSidebar"] { border-right: 3px solid var(--cord-yellow); }
+/* Sidebar — navy divider accent */
+[data-testid="stSidebar"] { border-right: 2px solid rgba(10,42,102,0.25); }
 
 h1, h2, h3 { letter-spacing: .2px; }
 [data-baseweb="input"] input, [data-baseweb="select"] { border-radius: 10px; }
@@ -102,15 +101,15 @@ def show_splash():
     }
     .cordai-glow {
         position: absolute; width: 520px; height: 520px; border-radius: 50%;
-        background: radial-gradient(circle, rgba(255,196,0,0.45) 0%, rgba(255,196,0,0.12) 45%, transparent 70%);
+        background: radial-gradient(circle, rgba(54,108,214,0.50) 0%, rgba(20,60,140,0.15) 45%, transparent 70%);
         filter: blur(20px); animation: cordPulse 2.2s ease-in-out infinite;
     }
     .cordai-brand {
         position: relative; color: #fff; font-size: 4.2rem; font-weight: 800;
         letter-spacing: 4px; opacity: 0; animation: cordBrand 3.4s ease forwards;
-        text-shadow: 0 0 24px rgba(255,196,0,0.85), 0 0 60px rgba(255,196,0,0.5);
+        text-shadow: 0 0 24px rgba(54,108,214,0.85), 0 0 60px rgba(20,60,140,0.55);
     }
-    .cordai-brand span { color: #FFC400; }
+    .cordai-brand span { color: #7FA8FF; }
     .cordai-status { position: relative; margin-top: 26px; height: 24px; color: #cfe0ff; opacity: .9; }
     .cordai-status div { position: absolute; left: 50%; transform: translateX(-50%);
         white-space: nowrap; opacity: 0; }
@@ -121,7 +120,7 @@ def show_splash():
     .cordai-bar { position: relative; margin-top: 40px; width: 240px; height: 4px;
         border-radius: 4px; background: rgba(255,255,255,0.12); overflow: hidden; }
     .cordai-bar::after { content:""; position:absolute; inset:0; width:0;
-        background: linear-gradient(90deg,#143C8C,#FFC400); animation: cordBar 3.0s ease forwards; }
+        background: linear-gradient(90deg,#143C8C,#7FA8FF); animation: cordBar 3.0s ease forwards; }
     @keyframes cordPulse { 0%,100%{transform:scale(0.9);opacity:.7;} 50%{transform:scale(1.1);opacity:1;} }
     @keyframes cordBrand { 0%{opacity:0;transform:scale(0.92);} 25%{opacity:1;transform:scale(1);}
         85%{opacity:1;} 100%{opacity:0;} }
