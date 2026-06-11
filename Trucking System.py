@@ -81,6 +81,10 @@ st.markdown("""
 [data-testid="stSidebar"] { border-right: 2px solid rgba(10,42,102,0.25); }
 
 h1, h2, h3 { letter-spacing: .2px; }
+
+/* Transparent top header/status bar */
+[data-testid="stHeader"] { background: transparent !important; }
+header[data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
 [data-baseweb="input"] input, [data-baseweb="select"] { border-radius: 10px; }
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
     border-radius: 12px; overflow: hidden;
