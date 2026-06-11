@@ -1020,28 +1020,43 @@ def admin_tracking():
         if st.button("🔄 Refresh now", key="track_refresh_btn"):
             st.rerun()
 
-    locrow = get_location(track)
-    if not locrow:
-        st.info(f"No location reported yet from {track}. They appear here once they open their itinerary and allow GPS.")
-        return
+    locrow = get_location(track) or {}
+    has_loc = locrow.get("lat") is not None and locrow.get("lng") is not None
 
-    try:
-        updated = datetime.fromisoformat(locrow["updated_at"])
-        mins = (datetime.now() - updated).total_seconds() / 60.0
-        ago = "just now" if mins < 1 else (f"{mins:.0f} min ago" if mins < 60 else f"{mins / 60:.1f} h ago")
-    except Exception:
-        ago = locrow["updated_at"]
-    st.caption(f"📍 {track} — last seen **{ago}** ({locrow['lat']:.5f}, {locrow['lng']:.5f})")
+    # Mirror exactly the itinerary the rep currently has open (current_aid), if known.
+    chosen_assignment = None
+    cur_aid = locrow.get("current_aid")
+    if cur_aid:
+        chosen_assignment = get_assignment(cur_aid)
+    if not chosen_assignment:
+        active = [x for x in list_assignments(track) if x["status"] != "Completed"]
+        chosen_assignment = active[0] if active else None
 
-    active = [x for x in list_assignments(track) if x["status"] != "Completed"]
-    seq = [{"name": f"📍 {track}", "lat": locrow["lat"], "lng": locrow["lng"]}]
-    if active:
-        astops = json.loads(active[0]["stops_json"])
+    if has_loc:
+        try:
+            updated = datetime.fromisoformat(locrow["updated_at"])
+            mins = (datetime.now() - updated).total_seconds() / 60.0
+            ago = "just now" if mins < 1 else (f"{mins:.0f} min ago" if mins < 60 else f"{mins / 60:.1f} h ago")
+        except Exception:
+            ago = locrow.get("updated_at", "")
+        st.caption(f"📍 {track} — last seen **{ago}** ({locrow['lat']:.5f}, {locrow['lng']:.5f})")
+        origin_name = f"📍 {track}"
+        origin_lat, origin_lng = locrow["lat"], locrow["lng"]
+    else:
+        st.info(f"No live GPS from {track} yet — showing the itinerary they have open. "
+                "Their position appears once they open their itinerary and allow location.")
+        origin_name = f"{DEPOT_NAME} (base)"
+        origin_lat, origin_lng = DEPOT_LAT, DEPOT_LNG
+
+    seq = [{"name": origin_name, "lat": origin_lat, "lng": origin_lng}]
+    if chosen_assignment:
+        astops = json.loads(chosen_assignment["stops_json"])
         remaining = [s for s in astops if not s.get("visited")]
         for s in remaining:
             seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
         done = sum(1 for s in astops if s.get("visited"))
-        st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited")
+        st.caption(f"Itinerary #{chosen_assignment['id']} (the one {track.split()[0]} has open): "
+                   f"{done}/{len(astops)} visited")
 
         # Per-stop arrival times + travel durations, plus a live en-route timer
         st.markdown("##### ⏱️ Progress")
@@ -1058,10 +1073,13 @@ def admin_tracking():
                     st.markdown(f"🚶 **{i}. {s['name']}** — en route")
             else:
                 st.markdown(f"⏳ **{i}. {s['name']}** — pending")
-    tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height,
-                           open_route=True, highlight_idx=1)
-    st_folium(tmap, width=None, height=map_height, use_container_width=True,
-              key=f"track_map_{track}_{locrow['updated_at']}", returned_objects=[])
+    else:
+        st.info(f"{track} hasn't opened an itinerary yet.")
+    if len(seq) >= 2 or has_loc:
+        tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height,
+                               open_route=True, highlight_idx=1)
+        st_folium(tmap, width=None, height=map_height, use_container_width=True,
+                  key=f"track_map_{track}_{locrow.get('updated_at', '')}", returned_objects=[])
 
 
 # =============================================================================
