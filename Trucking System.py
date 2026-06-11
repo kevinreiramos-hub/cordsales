@@ -823,6 +823,24 @@ def admin_page():
 
 
 def admin_welcome():
+    # Yellow accents scoped to this page only (other views stay navy)
+    st.markdown("""
+    <style>
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #FFC400 0%, #FFD740 100%) !important;
+        color: #0A2A66 !important; border: none !important; font-weight: 700 !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        box-shadow: 0 6px 18px rgba(255,196,0,0.45) !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1px solid rgba(255,196,0,0.65) !important;
+        box-shadow: 0 4px 16px rgba(255,196,0,0.12) !important;
+    }
+    [data-testid="stSidebar"] { border-right: 3px solid #FFC400 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.title(f"👋 Welcome, {USER['name']}")
     st.markdown("#### What would you like to work on?")
     st.write("")
