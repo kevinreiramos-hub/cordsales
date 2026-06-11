@@ -823,8 +823,6 @@ def admin_page():
         admin_itinerary()
     elif view == "tracking":
         admin_tracking()
-    elif view == "chat":
-        admin_chat()
     else:
         admin_welcome()
 
@@ -833,7 +831,7 @@ def admin_welcome():
     st.title(f"👋 Welcome, {USER['name']}")
     st.markdown("#### What would you like to work on?")
     st.write("")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
         with st.container(border=True):
             st.markdown("### 🧭 Plan & Assign Itineraries")
@@ -848,13 +846,11 @@ def admin_welcome():
             if st.button("Open Live Tracking", type="primary", use_container_width=True, key="go_track"):
                 st.session_state.admin_view = "tracking"
                 st.rerun()
-    with c3:
-        with st.container(border=True):
-            st.markdown("### 🤖 CORD AI Assistant")
-            st.caption("Just tell it what to do, e.g. “Give 2 Manila to Alex.” It plans from the rep's location.")
-            if st.button("Open CORD AI", type="primary", use_container_width=True, key="go_chat"):
-                st.session_state.admin_view = "chat"
-                st.rerun()
+
+    st.divider()
+    st.subheader("🤖 Ask CORD AI")
+    st.caption('e.g. “Give 3 Manila and 1 Caloocan to Alex”, “List all territories”, “Where is Ritchel?”')
+    _render_chat_box()
 
 
 def admin_itinerary():
@@ -1290,28 +1286,13 @@ def process_command(text):
             "*“Give 2 Manila to Alex”* or *“List all territories”*.", None)
 
 
-def admin_chat():
-    if st.button("⬅️ Back to menu", key="back_chat"):
-        st.session_state.admin_view = None
-        st.rerun()
-    st.title("🤖 CORD AI Assistant")
-    st.caption('Try: “Give 2 Manila to Alex”, “Assign 3 Quezon City to Ritchel”, '
-               '“Send Jomer 1 Caloocan”.')
-
+def _render_chat_box():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
     for role, msg in st.session_state.chat_history:
         with st.chat_message(role):
             st.markdown(msg)
-
-    prompt = st.chat_input("Type a command…")
-    if prompt:
-        st.session_state.chat_history.append(("user", prompt))
-        reply, proposal = process_command(prompt)
-        st.session_state.chat_history.append(("assistant", reply))
-        st.session_state.chat_proposal = proposal
-        st.rerun()
 
     proposal = st.session_state.get("chat_proposal")
     if proposal:
@@ -1345,6 +1326,14 @@ def admin_chat():
         if c2.button("❌ Discard", use_container_width=True):
             st.session_state.chat_proposal = None
             st.rerun()
+
+    prompt = st.chat_input("Ask CORD AI…  e.g. “Give 3 Manila and 1 Caloocan to Alex”")
+    if prompt:
+        st.session_state.chat_history.append(("user", prompt))
+        reply, proposal = process_command(prompt)
+        st.session_state.chat_history.append(("assistant", reply))
+        st.session_state.chat_proposal = proposal
+        st.rerun()
 
 
 # =============================================================================
