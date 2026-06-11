@@ -41,7 +41,7 @@ DEPOT_LAT, DEPOT_LNG = 14.5844537, 121.0475689
 DEFAULT_MAPBOX_TOKEN = "pk.eyJ1Ijoia2V2aW5yZWkyIiwiYSI6ImNtcHl4ejY4ejA1ODYydHB2dDN3NXppcm0ifQ.Xpq-jmcdlyoVLCwDGulA4g"
 DB_PATH = "delivery_app.db"
 SECRET_KEY = "cord-chem-internal-secret-change-this"   # used to sign the stay-logged-in token
-GEOFENCE_M = 50                                        # auto check-in radius (meters)
+GEOFENCE_M = 100                                       # auto check-in radius (meters)
 
 ACCOUNTS = pd.DataFrame({
     "Account Name": [
@@ -565,6 +565,7 @@ def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
         m = folium.Map(location=[center["lat"], center["lng"]], zoom_start=14)
 
     start = full_seq[0]
+    all_pts = [[start["lat"], start["lng"]]]
     if open_route:
         folium.Marker([start["lat"], start["lng"]], popup=start["name"],
                       icon=folium.Icon(color="green", icon="user")).add_to(m)
@@ -582,6 +583,7 @@ def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
             pts = get_mapbox_walk_route(a["lat"], a["lng"], b["lat"], b["lng"], token)
         if not pts:
             pts = [[a["lat"], a["lng"]], [b["lat"], b["lng"]]]
+        all_pts.extend(pts)
         folium.PolyLine(pts, color="#6A1B9A" if active else "#9E86C9",
                         weight=6 if active else 4, opacity=0.9 if active else 0.55,
                         dash_array="1,8").add_to(m)   # dotted = footpath
@@ -594,6 +596,12 @@ def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
         else:
             folium.Marker([b["lat"], b["lng"]], popup=f"Stop:<br>{b['name']}",
                           icon=folium.Icon(color="blue", icon="ok")).add_to(m)
+
+    # Auto-zoom so the whole visible path fits the screen (works on any phone size).
+    if len(all_pts) >= 2:
+        lats = [p[0] for p in all_pts]
+        lngs = [p[1] for p in all_pts]
+        m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]], padding=(40, 40))
     return m
 
 
@@ -648,7 +656,8 @@ def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None,
                 st.markdown(f"⏳ **Stop {step}:** {name}")
     with col2:
         m = build_route_map(full_seq, cur, token, map_height, open_route=open_route)
-        st_folium(m, width=800, height=map_height, key=f"{step_key}_map_{cur}", returned_objects=[])
+        st_folium(m, width=None, height=map_height, use_container_width=True,
+                  key=f"{step_key}_map_{cur}", returned_objects=[])
     st.caption("Purple dotted line = walking path. 🟢 Green marker = current GPS position.")
 
 
@@ -886,8 +895,8 @@ def admin_tracking():
         st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited · "
                    f"remaining: {', '.join(s['name'] for s in remaining) or 'none'}")
     tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height, open_route=True)
-    st_folium(tmap, width=800, height=map_height, key=f"track_map_{track}_{locrow['updated_at']}",
-              returned_objects=[])
+    st_folium(tmap, width=None, height=map_height, use_container_width=True,
+              key=f"track_map_{track}_{locrow['updated_at']}", returned_objects=[])
 
 
 # =============================================================================
