@@ -701,6 +701,13 @@ def admin_page():
         st.subheader("🗺️ Map")
         map_height = st.slider("Map height (px)", 400, 800, 520, step=20)
 
+        st.divider()
+        st.subheader("📡 Live Tracking")
+        track = st.selectbox("View a sales person", options=SALESPERSONS, key="track_sel")
+        track_auto = False
+        if HAS_AUTOREFRESH:
+            track_auto = st.checkbox("Auto-refresh every 15s", value=False, key="track_auto")
+
         st.subheader("🤖 AI Assistant")
         ai_api_key = st.text_input("Anthropic API key (optional)", type="password")
         with st.expander("Advanced"):
@@ -787,14 +794,10 @@ def admin_page():
             st.success(f"Assigned to {route['salesperson']} (itinerary #{aid}). It now shows on their account.")
 
     st.divider()
-    st.subheader("📡 Live Tracking")
-    track = st.selectbox("View a sales person's current location", options=SALESPERSONS, key="track_sel")
-    auto = False
-    if HAS_AUTOREFRESH:
-        auto = st.checkbox("Auto-refresh every 15s", value=False, key="track_auto")
-        if auto:
-            st_autorefresh(interval=15000, key="track_refresh")
-    else:
+    st.subheader(f"📡 Live Tracking — {track}")
+    if track_auto:
+        st_autorefresh(interval=15000, key="track_refresh")
+    elif not HAS_AUTOREFRESH:
         if st.button("🔄 Refresh now", key="track_refresh_btn"):
             st.rerun()
 
@@ -811,22 +814,14 @@ def admin_page():
         st.caption(f"📍 {track} — last seen **{ago}** ({locrow['lat']:.5f}, {locrow['lng']:.5f})")
 
         active = [x for x in list_assignments(track) if x["status"] != "Completed"]
+        # Show the rep against the ASSIGNED plan (remaining stops in their assigned order),
+        # so nothing looks 'skipped'. The rep's own screen re-optimizes for walking.
         seq = [{"name": f"📍 {track}", "lat": locrow["lat"], "lng": locrow["lng"]}]
-        remaining = []
         if active:
             astops = json.loads(active[0]["stops_json"])
             remaining = [s for s in astops if not s.get("visited")]
-            if remaining:
-                pts = [(locrow["lat"], locrow["lng"])] + [(s["lat"], s["lng"]) for s in remaining]
-                res = optimize_open_route(pts, "time", DEFAULT_MAPBOX_TOKEN, 3)
-                if res and res["order"]:
-                    seq = []
-                    for ip in res["order"]:
-                        if ip == 0:
-                            seq.append({"name": f"📍 {track}", "lat": locrow["lat"], "lng": locrow["lng"]})
-                        else:
-                            s = remaining[ip - 1]
-                            seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
+            for s in remaining:
+                seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
             done = sum(1 for s in astops if s.get("visited"))
             st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited · "
                        f"remaining: {', '.join(s['name'] for s in remaining) or 'none'}")
@@ -834,7 +829,8 @@ def admin_page():
         st_folium(tmap, width=800, height=map_height, key=f"track_map_{track}_{locrow['updated_at']}",
                   returned_objects=[])
 
-
+    st.divider()
+    st.subheader("📑 All Itineraries & GPS Check-ins")
     rows = list_assignments()
     if not rows:
         st.caption("No itineraries yet.")
