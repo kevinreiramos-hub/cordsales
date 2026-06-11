@@ -17,9 +17,9 @@ from streamlit_folium import st_folium
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
-# Optional browser geolocation component
+# Browser geolocation that prompts automatically on page load
 try:
-    from streamlit_geolocation import streamlit_geolocation
+    from streamlit_js_eval import get_geolocation
     HAS_GEO = True
 except Exception:
     HAS_GEO = False
@@ -748,16 +748,20 @@ def sales_page():
     m3.metric("Est. walking time", a["time_str"])
     st.caption(f"Status: **{a['status']}**  ·  Base: **{DEPOT_NAME}**")
 
-    # ---- GPS check-in -------------------------------------------------------
+    # ---- GPS check-in (auto-prompts on page load) ---------------------------
     st.subheader("📍 GPS Check-in")
     my_loc = None
     if HAS_GEO:
-        st.caption("Tap the location icon when you arrive. If you're within "
-                   f"{GEOFENCE_M} m of a stop, your arrival time is recorded automatically.")
-        loc = streamlit_geolocation()
-        if loc and loc.get("latitude") is not None:
-            my_lat, my_lng = float(loc["latitude"]), float(loc["longitude"])
+        st.caption("Your browser will ask to share your location when this page opens — tap **Allow**. "
+                   f"Arrivals within {GEOFENCE_M} m of a stop are then recorded automatically.")
+        loc = get_geolocation()  # fires the permission prompt automatically, no button
+        if loc and isinstance(loc, dict) and loc.get("coords"):
+            my_lat = float(loc["coords"]["latitude"])
+            my_lng = float(loc["coords"]["longitude"])
+            acc = loc["coords"].get("accuracy")
             my_loc = (my_lat, my_lng)
+            st.info(f"📡 Location received: {my_lat:.5f}, {my_lng:.5f}"
+                    + (f" (±{acc:.0f} m accuracy)" if acc else ""))
             changed = False
             for s in stops:
                 if not s.get("visited"):
@@ -771,9 +775,43 @@ def sales_page():
                 status = "Completed" if all(s.get("visited") for s in stops) else "In progress"
                 update_assignment(aid, stops, status)
                 st.rerun()
+            else:
+                pending = [s for s in stops if not s.get("visited")]
+                if pending:
+                    nearest = min(pending, key=lambda s: haversine_m(my_lat, my_lng, s["lat"], s["lng"]))
+                    nd = haversine_m(my_lat, my_lng, nearest["lat"], nearest["lng"])
+                    st.caption(f"Nearest pending stop: **{nearest['name']}** — {nd:.0f} m away "
+                               f"(auto check-in within {GEOFENCE_M} m).")
+        elif loc and isinstance(loc, dict) and loc.get("error"):
+            code = loc["error"].get("code")
+            if code == 1:
+                st.error("Location permission was denied. Enable location for this site in your "
+                         "browser settings (lock/aA icon → Location → Allow), then reload.")
+            else:
+                st.warning(f"Couldn't get location: {loc['error'].get('message', 'unknown error')}.")
+        else:
+            st.caption("⌛ Waiting for your location — please allow the permission prompt if it appears.")
     else:
-        st.warning("GPS component not installed. Run: `pip install streamlit-geolocation` "
-                   "to enable automatic check-ins. You can still mark stops manually below.")
+        st.warning("Location component not installed. Add `streamlit-js-eval` to requirements.txt "
+                   "to enable automatic check-ins. You can still check in manually below.")
+
+    # Manual fallback: one-tap check-in for the stop currently shown in the tracker,
+    # so the workflow works even if a phone/browser blocks the GPS component.
+    with st.expander("📌 Manual check-in (if GPS won't prompt)"):
+        pending_names = [s["name"] for s in stops if not s.get("visited")]
+        if pending_names:
+            pick = st.selectbox("I'm currently at:", options=pending_names, key=f"manual_{aid}")
+            if st.button("✅ Check in here now", key=f"manual_btn_{aid}"):
+                for s in stops:
+                    if s["name"] == pick:
+                        s["visited"] = True
+                        s["arrived_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                status = "Completed" if all(s.get("visited") for s in stops) else "In progress"
+                update_assignment(aid, stops, status)
+                st.success(f"Checked in at {pick}.")
+                st.rerun()
+        else:
+            st.caption("All stops already checked in. 🎉")
 
     full_seq = [depot_node()] + [{"name": s["name"], "lat": s["lat"], "lng": s["lng"]} for s in stops] + [depot_node()]
     remarks_map = {s["name"]: s.get("remarks", "") for s in stops}
