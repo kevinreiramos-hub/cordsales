@@ -1,6 +1,7 @@
 streamlit>=1.40
 streamlit-folium>=0.21
 streamlit-js-eval>=0.1.7
+streamlit-autorefresh>=1.0.1
 folium>=0.17
 pandas>=2.0
 numpy>=1.26
