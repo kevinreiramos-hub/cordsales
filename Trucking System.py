@@ -1066,19 +1066,92 @@ def _parse_count(text):
     return None
 
 
-def process_command(text):
-    """Interpret a command like 'Give 2 Manila to Alex' and propose an itinerary.
-    Returns (reply_text, proposal_or_None)."""
-    territories = list(dict.fromkeys(ACCOUNTS["Territory"].tolist()))
-
-    person = None
+def _find_person(text):
     for name in SALESPERSONS:
         if name.split()[0].lower() in text.lower() or name.lower() in text.lower():
-            person = name
-            break
-    terr = next((t for t in territories if t.lower() in text.lower()), None)
-    n = _parse_count(text)
+            return name
+    return None
 
+
+def _find_territory(text):
+    territories = list(dict.fromkeys(ACCOUNTS["Territory"].tolist()))
+    return next((t for t in territories if t.lower() in text.lower()), None)
+
+
+def _is_assign(t):
+    return any(k in t for k in ["give", "assign", "send", "route", "add", "plan", "dispatch"])
+
+
+def _help_text():
+    return ("Here's what I can do:\n"
+            "- **Assign work:** “Give 2 Manila to Alex”, “Assign 3 Quezon City to Ritchel”, “Send Jomer 1 Caloocan”\n"
+            "- **List territories:** “List all territories”\n"
+            "- **List accounts:** “Show all accounts” or “List Manila accounts”\n"
+            "- **Locate a rep:** “Where is Alex?”\n"
+            "- **Check progress:** “Status of Ritchel” or “Show all itineraries status”")
+
+
+def _territory_list_text():
+    counts = ACCOUNTS["Territory"].value_counts()
+    lines = [f"There are **{len(counts)}** territories, with **{len(ACCOUNTS)}** accounts in total:"]
+    for terr, c in counts.items():
+        lines.append(f"- **{terr}** — {c} account(s)")
+    return "\n".join(lines)
+
+
+def _account_list_text(terr=None):
+    df = ACCOUNTS if not terr else ACCOUNTS[ACCOUNTS["Territory"].str.lower() == terr.lower()]
+    if df.empty:
+        return f"No accounts found in **{terr}**."
+    title = (f"All **{len(df)}** accounts" if not terr else f"**{len(df)}** account(s) in **{terr}**") + ":"
+    lines = [title]
+    for terr_name, grp in df.groupby("Territory"):
+        names = ", ".join(grp["Account Name"].tolist())
+        lines.append(f"- **{terr_name}:** {names}")
+    return "\n".join(lines)
+
+
+def _rep_status_text(person):
+    loc = get_location(person)
+    parts = []
+    if loc:
+        try:
+            updated = datetime.fromisoformat(loc["updated_at"])
+            mins = (datetime.now() - updated).total_seconds() / 60.0
+            ago = "just now" if mins < 1 else (f"{mins:.0f} min ago" if mins < 60 else f"{mins / 60:.1f} h ago")
+        except Exception:
+            ago = loc["updated_at"]
+        parts.append(f"📍 **{person}** was last seen **{ago}** at {loc['lat']:.4f}, {loc['lng']:.4f}.")
+    else:
+        parts.append(f"I don't have a live location for **{person}** yet — they need to open their app and allow GPS.")
+    active = [a for a in list_assignments(person) if a["status"] != "Completed"]
+    if active:
+        astops = json.loads(active[0]["stops_json"])
+        done = sum(1 for s in astops if s.get("visited"))
+        nxt = next((s["name"] for s in astops if not s.get("visited")), "—")
+        parts.append(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited · next stop: **{nxt}**.")
+    else:
+        parts.append("No active itinerary right now.")
+    return "\n".join(parts)
+
+
+def _status_text(person=None):
+    people = [person] if person else SALESPERSONS
+    lines = ["Here's the current status:"]
+    for p in people:
+        active = [a for a in list_assignments(p) if a["status"] != "Completed"]
+        if active:
+            astops = json.loads(active[0]["stops_json"])
+            done = sum(1 for s in astops if s.get("visited"))
+            lines.append(f"- **{p}** — itinerary #{active[0]['id']}: {done}/{len(astops)} visited")
+        else:
+            lines.append(f"- **{p}** — no active itinerary")
+    return "\n".join(lines)
+
+
+def _propose_assignment(text, person, terr, n):
+    """Existing behavior: plan the nearest N accounts in a territory from the rep's live location."""
+    territories = list(dict.fromkeys(ACCOUNTS["Territory"].tolist()))
     if not person:
         return ("Which sales person? For example: *“Give 2 Manila to Alex”*. "
                 f"Options: {', '.join(SALESPERSONS)}.", None)
@@ -1137,6 +1210,45 @@ def process_command(text):
     proposal = {"salesperson": person, "origin": origin, "origin_name": origin_name,
                 "ordered": ordered, "total_km": tot_d / 1000.0, "time_str": fmt_duration(tot_t)}
     return ("\n".join(lines), proposal)
+
+
+def process_command(text):
+    """Route a chat message to a query answer or an assignment proposal.
+    Returns (reply_text, proposal_or_None)."""
+    t = text.lower()
+    person = _find_person(text)
+    terr = _find_territory(text)
+    n = _parse_count(text)
+
+    # --- Informational queries (no sales person being assigned) ---
+    if "help" in t or "what can you" in t:
+        return (_help_text(), None)
+
+    if person and any(k in t for k in ["where", "locate", "location", "find "]):
+        return (_rep_status_text(person), None)
+
+    if any(k in t for k in ["status", "progress", "how is", "how's", "how are"]) and not _is_assign(t):
+        return (_status_text(person), None)
+
+    # List territories — only when no rep is named (so 'give 2 Manila territory to Alex' still assigns)
+    if "territor" in t and person is None and \
+            any(k in t for k in ["list", "all", "show", "what", "which", "how many", "available", "give"]):
+        return (_territory_list_text(), None)
+
+    # List accounts — only when no rep is named and not an assignment
+    if "account" in t and person is None and not _is_assign(t):
+        return (_account_list_text(terr), None)
+
+    # --- Assignment intent ---
+    if person or (_is_assign(t) and terr):
+        return _propose_assignment(text, person, terr, n)
+
+    # Plain rep name → show their status
+    if person:
+        return (_rep_status_text(person), None)
+
+    return ("I didn't catch that. Type **help** to see what I can do, or try "
+            "*“Give 2 Manila to Alex”* or *“List all territories”*.", None)
 
 
 def admin_chat():
