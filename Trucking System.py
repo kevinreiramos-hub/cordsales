@@ -101,15 +101,15 @@ def show_splash():
     }
     .cordai-glow {
         position: absolute; width: 520px; height: 520px; border-radius: 50%;
-        background: radial-gradient(circle, rgba(54,108,214,0.50) 0%, rgba(20,60,140,0.15) 45%, transparent 70%);
+        background: radial-gradient(circle, rgba(255,196,0,0.45) 0%, rgba(255,196,0,0.12) 45%, transparent 70%);
         filter: blur(20px); animation: cordPulse 2.2s ease-in-out infinite;
     }
     .cordai-brand {
         position: relative; color: #fff; font-size: 4.2rem; font-weight: 800;
         letter-spacing: 4px; opacity: 0; animation: cordBrand 3.4s ease forwards;
-        text-shadow: 0 0 24px rgba(54,108,214,0.85), 0 0 60px rgba(20,60,140,0.55);
+        text-shadow: 0 0 24px rgba(255,196,0,0.85), 0 0 60px rgba(255,196,0,0.5);
     }
-    .cordai-brand span { color: #7FA8FF; }
+    .cordai-brand span { color: #FFC400; }
     .cordai-status { position: relative; margin-top: 26px; height: 24px; color: #cfe0ff; opacity: .9; }
     .cordai-status div { position: absolute; left: 50%; transform: translateX(-50%);
         white-space: nowrap; opacity: 0; }
@@ -120,7 +120,7 @@ def show_splash():
     .cordai-bar { position: relative; margin-top: 40px; width: 240px; height: 4px;
         border-radius: 4px; background: rgba(255,255,255,0.12); overflow: hidden; }
     .cordai-bar::after { content:""; position:absolute; inset:0; width:0;
-        background: linear-gradient(90deg,#143C8C,#7FA8FF); animation: cordBar 3.0s ease forwards; }
+        background: linear-gradient(90deg,#143C8C,#FFC400); animation: cordBar 3.0s ease forwards; }
     @keyframes cordPulse { 0%,100%{transform:scale(0.9);opacity:.7;} 50%{transform:scale(1.1);opacity:1;} }
     @keyframes cordBrand { 0%{opacity:0;transform:scale(0.92);} 25%{opacity:1;transform:scale(1);}
         85%{opacity:1;} 100%{opacity:0;} }
@@ -823,24 +823,6 @@ def admin_page():
 
 
 def admin_welcome():
-    # Yellow accents scoped to this page only (other views stay navy)
-    st.markdown("""
-    <style>
-    .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #FFC400 0%, #FFD740 100%) !important;
-        color: #0A2A66 !important; border: none !important; font-weight: 700 !important;
-    }
-    .stButton > button[kind="primary"]:hover {
-        box-shadow: 0 6px 18px rgba(255,196,0,0.45) !important;
-    }
-    [data-testid="stVerticalBlockBorderWrapper"] {
-        border: 1px solid rgba(255,196,0,0.65) !important;
-        box-shadow: 0 4px 16px rgba(255,196,0,0.12) !important;
-    }
-    [data-testid="stSidebar"] { border-right: 3px solid #FFC400 !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
     st.title(f"👋 Welcome, {USER['name']}")
     st.markdown("#### What would you like to work on?")
     st.write("")
