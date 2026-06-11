@@ -12,6 +12,7 @@ import os
 import json
 import math
 import base64
+import time
 from datetime import date, datetime
 from streamlit_folium import st_folium
 from ortools.constraint_solver import routing_enums_pb2
@@ -35,6 +36,125 @@ except Exception:
 # 1. CONFIG + CONSTANTS
 # =============================================================================
 st.set_page_config(page_title="Cord Chemicals Field Sales", layout="wide")
+
+# ---- Modern, professional theme (fonts left untouched) ----------------------
+st.markdown("""
+<style>
+:root {
+    --cord-accent: #6A1B9A;
+    --cord-accent2: #2E7D32;
+    --cord-bg: #f6f7fb;
+}
+.stApp { background: var(--cord-bg); }
+section.main > div { padding-top: 0.5rem; }
+
+/* Buttons */
+.stButton > button {
+    border-radius: 12px;
+    border: 1px solid rgba(106,27,154,0.25);
+    padding: 0.5rem 1rem;
+    font-weight: 600;
+    transition: all .15s ease;
+    box-shadow: 0 1px 2px rgba(16,24,40,0.06);
+}
+.stButton > button:hover {
+    border-color: var(--cord-accent);
+    box-shadow: 0 4px 14px rgba(106,27,154,0.18);
+    transform: translateY(-1px);
+}
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #6A1B9A 0%, #8E24AA 100%);
+    border: none; color: #fff;
+}
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1px solid #ececf3;
+    border-radius: 16px;
+    padding: 16px 18px;
+    box-shadow: 0 2px 10px rgba(16,24,40,0.05);
+}
+[data-testid="stMetricValue"] { color: var(--cord-accent); }
+
+/* Bordered containers as cards */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 16px !important;
+    box-shadow: 0 2px 12px rgba(16,24,40,0.06);
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background: #ffffff;
+    border-right: 1px solid #ececf3;
+}
+
+/* Headings */
+h1, h2, h3 { letter-spacing: .2px; }
+
+/* Inputs */
+[data-baseweb="input"] input, [data-baseweb="select"] { border-radius: 10px; }
+
+/* Dataframe / editor rounding */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    border-radius: 12px; overflow: hidden; border: 1px solid #ececf3;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+def show_splash():
+    """One-time CORD AI intro: glowing background, brand fade, booting status."""
+    st.markdown("""
+    <style>
+    .cordai-splash {
+        position: fixed; inset: 0; z-index: 99999;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        background: radial-gradient(1200px 600px at 50% 40%, #241b3a 0%, #120c20 60%, #0b0716 100%);
+        animation: cordFade 3.4s ease forwards;
+    }
+    .cordai-glow {
+        position: absolute; width: 520px; height: 520px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(142,36,170,0.55) 0%, rgba(106,27,154,0.15) 45%, transparent 70%);
+        filter: blur(20px); animation: cordPulse 2.2s ease-in-out infinite;
+    }
+    .cordai-brand {
+        position: relative; color: #fff; font-size: 4.2rem; font-weight: 800;
+        letter-spacing: 4px; opacity: 0; animation: cordBrand 3.4s ease forwards;
+        text-shadow: 0 0 24px rgba(142,36,170,0.8), 0 0 60px rgba(106,27,154,0.5);
+    }
+    .cordai-brand span { color: #CE93D8; }
+    .cordai-status { position: relative; margin-top: 26px; height: 24px; color: #cbb8e6; opacity: .9; }
+    .cordai-status div { position: absolute; left: 50%; transform: translateX(-50%);
+        white-space: nowrap; opacity: 0; }
+    .cordai-status .s1 { animation: cordLine 3.4s ease forwards 0.2s; }
+    .cordai-status .s2 { animation: cordLine 3.4s ease forwards 1.0s; }
+    .cordai-status .s3 { animation: cordLine 3.4s ease forwards 1.8s; }
+    .cordai-status .s4 { animation: cordLine 3.4s ease forwards 2.5s; }
+    .cordai-bar { position: relative; margin-top: 40px; width: 240px; height: 4px;
+        border-radius: 4px; background: rgba(255,255,255,0.12); overflow: hidden; }
+    .cordai-bar::after { content:""; position:absolute; inset:0; width:0;
+        background: linear-gradient(90deg,#8E24AA,#CE93D8); animation: cordBar 3.0s ease forwards; }
+    @keyframes cordPulse { 0%,100%{transform:scale(0.9);opacity:.7;} 50%{transform:scale(1.1);opacity:1;} }
+    @keyframes cordBrand { 0%{opacity:0;transform:scale(0.92);} 25%{opacity:1;transform:scale(1);}
+        85%{opacity:1;} 100%{opacity:0;} }
+    @keyframes cordLine { 0%,8%{opacity:0;} 14%{opacity:1;} 24%{opacity:1;} 32%{opacity:0;} 100%{opacity:0;} }
+    @keyframes cordBar { 0%{width:0;} 100%{width:100%;} }
+    @keyframes cordFade { 0%{opacity:1;} 88%{opacity:1;} 100%{opacity:0;visibility:hidden;} }
+    </style>
+    <div class="cordai-splash">
+        <div class="cordai-glow"></div>
+        <div class="cordai-brand">CORD<span> AI</span></div>
+        <div class="cordai-status">
+            <div class="s1">Executing libraries…</div>
+            <div class="s2">Booting engine…</div>
+            <div class="s3">Calibrating routes &amp; GPS…</div>
+            <div class="s4">Booting CORD AI…</div>
+        </div>
+        <div class="cordai-bar"></div>
+    </div>
+    """, unsafe_allow_html=True)
+    time.sleep(3.3)
 
 DEPOT_NAME = "Cord Chemicals"
 DEPOT_LAT, DEPOT_LNG = 14.5844537, 121.0475689
@@ -205,6 +325,12 @@ def get_location(salesperson):
 
 
 init_db()
+
+# One-time CORD AI splash per browser session
+if "splash_done" not in st.session_state:
+    show_splash()
+    st.session_state.splash_done = True
+    st.rerun()
 
 # =============================================================================
 # 3. STAY-LOGGED-IN TOKEN + AUTH GATE
@@ -834,7 +960,8 @@ def admin_itinerary():
         if st.button(f"📌 Assign this itinerary to {route['salesperson']}", type="primary"):
             stops_payload = [{"name": s["name"], "lat": s["lat"], "lng": s["lng"],
                               "remarks": st.session_state.get("remarks", {}).get(s["name"], ""),
-                              "visited": False, "arrived_at": None} for s in route["ordered"]]
+                              "visited": False, "arrived_at": None,
+                              "departed_at": None, "travel_secs": None} for s in route["ordered"]]
             aid = create_assignment(route["salesperson"], stops_payload,
                                     route["total_km"], route["time_str"], USER["name"])
             st.success(f"Assigned to {route['salesperson']} (itinerary #{aid}). It now shows on their account.")
@@ -851,7 +978,8 @@ def admin_itinerary():
             st.caption(f"{a['total_km']:.1f} km · ~{a['time_str']} walking · assigned by {a['created_by']}")
             for i, s in enumerate(stops, 1):
                 if s.get("arrived_at"):
-                    st.markdown(f"✅ **{i}. {s['name']}** — arrived **{s['arrived_at']}**")
+                    took = f" · took {fmt_duration(s['travel_secs'])}" if s.get("travel_secs") else ""
+                    st.markdown(f"✅ **{i}. {s['name']}** — arrived **{s['arrived_at']}**{took}")
                 else:
                     st.markdown(f"⏳ **{i}. {s['name']}** — not yet visited")
             if st.button("Delete", key=f"del_{a['id']}"):
@@ -900,8 +1028,23 @@ def admin_tracking():
         for s in remaining:
             seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
         done = sum(1 for s in astops if s.get("visited"))
-        st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited · "
-                   f"remaining: {', '.join(s['name'] for s in remaining) or 'none'}")
+        st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited")
+
+        # Per-stop arrival times + travel durations, plus a live en-route timer
+        st.markdown("##### ⏱️ Progress")
+        target = next((s for s in astops if not s.get("visited")), None)
+        for i, s in enumerate(astops, 1):
+            if s.get("arrived_at"):
+                took = f" · took **{fmt_duration(s['travel_secs'])}**" if s.get("travel_secs") else ""
+                st.markdown(f"✅ **{i}. {s['name']}** — arrived **{s['arrived_at']}**{took}")
+            elif s is target and s.get("departed_at"):
+                try:
+                    elapsed = (datetime.now() - datetime.fromisoformat(s["departed_at"])).total_seconds()
+                    st.markdown(f"🚶 **{i}. {s['name']}** — en route, **{fmt_duration(elapsed)}** so far")
+                except Exception:
+                    st.markdown(f"🚶 **{i}. {s['name']}** — en route")
+            else:
+                st.markdown(f"⏳ **{i}. {s['name']}** — pending")
     tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height,
                            open_route=True, highlight_idx=1)
     st_folium(tmap, width=None, height=map_height, use_container_width=True,
@@ -947,18 +1090,35 @@ def sales_page():
             my_lng = float(loc["coords"]["longitude"])
             acc = loc["coords"].get("accuracy")
             my_loc = (my_lat, my_lng)
+            prev = get_location(USER["name"])
+            moved = haversine_m(prev["lat"], prev["lng"], my_lat, my_lng) if prev else 0.0
             upsert_location(USER["name"], my_lat, my_lng)   # let admin track this rep
             st.info(f"📡 Location received: {my_lat:.5f}, {my_lng:.5f}"
                     + (f" (±{acc:.0f} m accuracy)" if acc else ""))
+            now = datetime.now()
             changed = False
+
+            # Start the clock for the current target once the rep has actually moved ≥50 m
+            target = next((s for s in stops if not s.get("visited")), None)
+            if target and moved >= 50 and not target.get("departed_at"):
+                target["departed_at"] = now.isoformat(timespec="seconds")
+                changed = True
+
             for s in stops:
                 if not s.get("visited"):
                     d = haversine_m(my_lat, my_lng, s["lat"], s["lng"])
                     if d <= GEOFENCE_M:
                         s["visited"] = True
-                        s["arrived_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        s["arrived_at"] = now.strftime("%Y-%m-%d %H:%M")
+                        dep = s.get("departed_at")
+                        if dep:
+                            try:
+                                s["travel_secs"] = (now - datetime.fromisoformat(dep)).total_seconds()
+                            except Exception:
+                                s["travel_secs"] = None
                         changed = True
-                        st.success(f"📍 Checked in at {s['name']} ({d:.0f} m away).")
+                        took = f" · travel {fmt_duration(s['travel_secs'])}" if s.get("travel_secs") else ""
+                        st.success(f"📍 Checked in at {s['name']} ({d:.0f} m away){took}.")
             if changed:
                 status = "Completed" if all(s.get("visited") for s in stops) else "In progress"
                 update_assignment(aid, stops, status)
