@@ -220,7 +220,12 @@ def init_db():
         stops_json TEXT, total_km REAL, time_str TEXT,
         created_by TEXT, created_at TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS live_locations (
-        salesperson TEXT PRIMARY KEY, lat REAL, lng REAL, updated_at TEXT)""")
+        salesperson TEXT PRIMARY KEY, lat REAL, lng REAL, updated_at TEXT,
+        current_aid INTEGER)""")
+    # Migration: add current_aid to older DBs that predate this column
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(live_locations)").fetchall()]
+    if "current_aid" not in cols:
+        cur.execute("ALTER TABLE live_locations ADD COLUMN current_aid INTEGER")
     # Ensure every seed account exists (creates missing ones like 'admin' on upgrade,
     # without overwriting accounts/passwords that already exist).
     for username, name, role, pw in SEED_USERS:
@@ -297,13 +302,25 @@ def delete_assignment(aid):
     conn.close()
 
 
-def upsert_location(salesperson, lat, lng):
+def upsert_location(salesperson, lat, lng, current_aid=None):
     conn = get_conn()
-    conn.execute("""INSERT INTO live_locations (salesperson, lat, lng, updated_at)
-        VALUES (?,?,?,?)
+    conn.execute("""INSERT INTO live_locations (salesperson, lat, lng, updated_at, current_aid)
+        VALUES (?,?,?,?,?)
         ON CONFLICT(salesperson) DO UPDATE SET lat=excluded.lat, lng=excluded.lng,
-        updated_at=excluded.updated_at""",
-        (salesperson, lat, lng, datetime.now().isoformat(timespec="seconds")))
+        updated_at=excluded.updated_at,
+        current_aid=COALESCE(excluded.current_aid, live_locations.current_aid)""",
+        (salesperson, lat, lng, datetime.now().isoformat(timespec="seconds"), current_aid))
+    conn.commit()
+    conn.close()
+
+
+def set_current_assignment(salesperson, aid):
+    """Record which itinerary the rep currently has open, so admin tracking mirrors it."""
+    conn = get_conn()
+    conn.execute("""INSERT INTO live_locations (salesperson, current_aid, updated_at)
+        VALUES (?,?,?)
+        ON CONFLICT(salesperson) DO UPDATE SET current_aid=excluded.current_aid""",
+        (salesperson, aid, datetime.now().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
 
@@ -1349,6 +1366,7 @@ def sales_page():
     labels = {f"#{a['id']} · {a['run_date']} · {a['status']}": a["id"] for a in mine}
     choice = st.selectbox("Choose an itinerary", options=list(labels.keys()))
     aid = labels[choice]
+    set_current_assignment(USER["name"], aid)   # mirror this selection on admin tracking
 
     if st.session_state.get("drv_current_aid") != aid:
         st.session_state.drv_current_aid = aid
@@ -1377,7 +1395,7 @@ def sales_page():
             my_loc = (my_lat, my_lng)
             prev = get_location(USER["name"])
             moved = haversine_m(prev["lat"], prev["lng"], my_lat, my_lng) if prev else 0.0
-            upsert_location(USER["name"], my_lat, my_lng)   # let admin track this rep
+            upsert_location(USER["name"], my_lat, my_lng, current_aid=aid)   # let admin track this rep
             st.info(f"📡 Location received: {my_lat:.5f}, {my_lng:.5f}"
                     + (f" (±{acc:.0f} m accuracy)" if acc else ""))
             now = datetime.now()
