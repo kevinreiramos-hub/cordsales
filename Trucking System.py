@@ -24,6 +24,13 @@ try:
 except Exception:
     HAS_GEO = False
 
+# Optional auto-refresh for live tracking
+try:
+    from streamlit_autorefresh import st_autorefresh
+    HAS_AUTOREFRESH = True
+except Exception:
+    HAS_AUTOREFRESH = False
+
 # =============================================================================
 # 1. CONFIG + CONSTANTS
 # =============================================================================
@@ -34,7 +41,7 @@ DEPOT_LAT, DEPOT_LNG = 14.5844537, 121.0475689
 DEFAULT_MAPBOX_TOKEN = "pk.eyJ1Ijoia2V2aW5yZWkyIiwiYSI6ImNtcHl4ejY4ejA1ODYydHB2dDN3NXppcm0ifQ.Xpq-jmcdlyoVLCwDGulA4g"
 DB_PATH = "delivery_app.db"
 SECRET_KEY = "cord-chem-internal-secret-change-this"   # used to sign the stay-logged-in token
-GEOFENCE_M = 120                                        # auto check-in radius (meters)
+GEOFENCE_M = 50                                        # auto check-in radius (meters)
 
 ACCOUNTS = pd.DataFrame({
     "Account Name": [
@@ -101,6 +108,8 @@ def init_db():
         run_date TEXT, driver TEXT, truck TEXT, status TEXT,
         stops_json TEXT, total_km REAL, time_str TEXT,
         created_by TEXT, created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS live_locations (
+        salesperson TEXT PRIMARY KEY, lat REAL, lng REAL, updated_at TEXT)""")
     # Ensure every seed account exists (creates missing ones like 'admin' on upgrade,
     # without overwriting accounts/passwords that already exist).
     for username, name, role, pw in SEED_USERS:
@@ -175,6 +184,24 @@ def delete_assignment(aid):
     conn.execute("DELETE FROM assignments WHERE id=?", (aid,))
     conn.commit()
     conn.close()
+
+
+def upsert_location(salesperson, lat, lng):
+    conn = get_conn()
+    conn.execute("""INSERT INTO live_locations (salesperson, lat, lng, updated_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(salesperson) DO UPDATE SET lat=excluded.lat, lng=excluded.lng,
+        updated_at=excluded.updated_at""",
+        (salesperson, lat, lng, datetime.now().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+
+def get_location(salesperson):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM live_locations WHERE salesperson=?", (salesperson,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 init_db()
@@ -423,6 +450,63 @@ def generate_ai_comment(findings, num_stops, total_km, total_time_str, ordered_n
     return heuristic_comment(findings, num_stops, total_km, total_time_str)
 
 
+def optimize_open_route(points, objective, mapbox_token, solver_seconds):
+    """Open path: start at points[0] (current location), visit all others, no forced return.
+    points: list of (lat, lng). Returns ordered indices into `points` starting with 0."""
+    n = len(points)
+    if n <= 1:
+        return {"order": list(range(n)), "durations": [[0]], "distances": [[0]], "source": "none"}
+
+    durations = distances = None
+    source = None
+    if mapbox_token and n <= 25:
+        durations, distances = get_mapbox_walk_matrices(tuple(points), mapbox_token)
+        if durations is not None:
+            source = "mapbox"
+    if durations is None:
+        hav = haversine_matrix(points)
+        distances = hav.tolist()
+        durations = (hav / 1.39).tolist()
+        source = "fallback"
+
+    dur = np.array(durations, dtype=float)
+    dist = np.array(distances, dtype=float)
+    base = dur if objective == "time" else dist
+    base = np.nan_to_num(base, nan=1e9, posinf=1e9)
+
+    # Add a dummy "end" node with zero cost to/from everything → open path (no forced return).
+    size = n + 1
+    matrix = np.zeros((size, size))
+    matrix[:n, :n] = np.round(base).astype(int)
+    matrix = matrix.astype(int).tolist()
+    dummy = n
+
+    manager = pywrapcp.RoutingIndexManager(size, 1, [0], [dummy])
+    routing = pywrapcp.RoutingModel(manager)
+
+    def cb(from_index, to_index):
+        return matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+
+    idx = routing.RegisterTransitCallback(cb)
+    routing.SetArcCostEvaluatorOfAllVehicles(idx)
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(int(solver_seconds))
+    solution = routing.SolveWithParameters(params)
+    if not solution:
+        return None
+
+    order = []
+    index = routing.Start(0)
+    while not routing.IsEnd(index):
+        node = manager.IndexToNode(index)
+        if node != dummy:
+            order.append(node)
+        index = solution.Value(routing.NextVar(index))
+    return {"order": order, "durations": durations, "distances": distances, "source": source}
+
+
 def optimize_walk_route(df, objective, mapbox_token, solver_seconds):
     coords = [tuple(x) for x in df[["Latitude", "Longitude"]].values.tolist()]
     durations = distances = None
@@ -468,8 +552,9 @@ def optimize_walk_route(df, objective, mapbox_token, solver_seconds):
 
 
 # ---- Shared route map + step tracker ----------------------------------------
-def build_route_map(full_seq, current_idx, token, map_height, my_loc=None):
-    """full_seq: list of {name,lat,lng}; index 0 and last are the base."""
+def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
+    """full_seq: list of {name,lat,lng}. For a closed route, index 0 and last are the base.
+    For an open route, index 0 is the rep's current location and the last node is a real stop."""
     center = full_seq[current_idx]
     if token:
         tiles_url = ("https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/"
@@ -479,9 +564,15 @@ def build_route_map(full_seq, current_idx, token, map_height, my_loc=None):
     else:
         m = folium.Map(location=[center["lat"], center["lng"]], zoom_start=14)
 
-    base = full_seq[0]
-    folium.Marker([base["lat"], base["lng"]], popup=base["name"],
-                  icon=folium.Icon(color="black", icon="home")).add_to(m)
+    start = full_seq[0]
+    if open_route:
+        folium.Marker([start["lat"], start["lng"]], popup=start["name"],
+                      icon=folium.Icon(color="green", icon="user")).add_to(m)
+        folium.Circle([start["lat"], start["lng"]], radius=GEOFENCE_M, color="#2E7D32",
+                      fill=True, fill_opacity=0.08).add_to(m)
+    else:
+        folium.Marker([start["lat"], start["lng"]], popup=start["name"],
+                      icon=folium.Icon(color="black", icon="home")).add_to(m)
 
     for i in range(1, current_idx + 1):
         a, b = full_seq[i - 1], full_seq[i]
@@ -495,28 +586,22 @@ def build_route_map(full_seq, current_idx, token, map_height, my_loc=None):
                         weight=6 if active else 4, opacity=0.9 if active else 0.55,
                         dash_array="1,8").add_to(m)   # dotted = footpath
         last = (i == len(full_seq) - 1)
-        if last:
-            continue
+        if last and not open_route:
+            continue  # closed route: last node is the depot, already pinned
         if active:
             folium.Marker([b["lat"], b["lng"]], popup=f"NEXT STOP:<br>{b['name']}",
                           icon=folium.Icon(color="red", icon="flag")).add_to(m)
         else:
-            folium.Marker([b["lat"], b["lng"]], popup=f"Visited:<br>{b['name']}",
+            folium.Marker([b["lat"], b["lng"]], popup=f"Stop:<br>{b['name']}",
                           icon=folium.Icon(color="blue", icon="ok")).add_to(m)
-
-    if my_loc:
-        folium.Marker([my_loc[0], my_loc[1]], popup="You are here",
-                      icon=folium.Icon(color="green", icon="user")).add_to(m)
-        folium.Circle([my_loc[0], my_loc[1]], radius=GEOFENCE_M, color="#2E7D32",
-                      fill=True, fill_opacity=0.08).add_to(m)
     return m
 
 
-def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None, arrived_map=None, my_loc=None):
+def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None, arrived_map=None, open_route=False):
     remarks_map = remarks_map or {}
     arrived_map = arrived_map or {}
     last_pos = len(full_seq) - 1
-    num_stops = last_pos - 1
+    num_stops = last_pos if open_route else last_pos - 1
 
     if step_key not in st.session_state:
         st.session_state[step_key] = 1
@@ -536,7 +621,7 @@ def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None,
     dest = full_seq[cur]
 
     with c_text:
-        if cur == last_pos:
+        if (not open_route) and cur == last_pos:
             st.markdown(f"<h3 style='text-align:center;color:#6A1B9A;'>🏁 Back to Base: {dest['name']}</h3>",
                         unsafe_allow_html=True)
         else:
@@ -553,7 +638,7 @@ def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None,
         for step in range(1, len(full_seq)):
             name = full_seq[step]["name"]
             stamp = arrived_map.get(name)
-            if step == last_pos:
+            if (not open_route) and step == last_pos:
                 st.markdown(f"{'✅' if cur >= last_pos else '🏁'} **Back to Base:** {name}")
             elif stamp:
                 st.markdown(f"✅ **Stop {step}:** ~~{name}~~ — *{stamp}*")
@@ -562,9 +647,9 @@ def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None,
             else:
                 st.markdown(f"⏳ **Stop {step}:** {name}")
     with col2:
-        m = build_route_map(full_seq, cur, token, map_height, my_loc=my_loc)
+        m = build_route_map(full_seq, cur, token, map_height, open_route=open_route)
         st_folium(m, width=800, height=map_height, key=f"{step_key}_map_{cur}", returned_objects=[])
-    st.caption("Purple dotted line = walking path. 🟢 Green marker = the rep's live GPS position.")
+    st.caption("Purple dotted line = walking path. 🟢 Green marker = current GPS position.")
 
 
 def depot_node():
@@ -702,7 +787,54 @@ def admin_page():
             st.success(f"Assigned to {route['salesperson']} (itinerary #{aid}). It now shows on their account.")
 
     st.divider()
-    st.subheader("📑 All Itineraries & GPS Check-ins")
+    st.subheader("📡 Live Tracking")
+    track = st.selectbox("View a sales person's current location", options=SALESPERSONS, key="track_sel")
+    auto = False
+    if HAS_AUTOREFRESH:
+        auto = st.checkbox("Auto-refresh every 15s", value=False, key="track_auto")
+        if auto:
+            st_autorefresh(interval=15000, key="track_refresh")
+    else:
+        if st.button("🔄 Refresh now", key="track_refresh_btn"):
+            st.rerun()
+
+    locrow = get_location(track)
+    if not locrow:
+        st.info(f"No location reported yet from {track}. They appear here once they open their itinerary and allow GPS.")
+    else:
+        try:
+            updated = datetime.fromisoformat(locrow["updated_at"])
+            mins = (datetime.now() - updated).total_seconds() / 60.0
+            ago = "just now" if mins < 1 else (f"{mins:.0f} min ago" if mins < 60 else f"{mins / 60:.1f} h ago")
+        except Exception:
+            ago = locrow["updated_at"]
+        st.caption(f"📍 {track} — last seen **{ago}** ({locrow['lat']:.5f}, {locrow['lng']:.5f})")
+
+        active = [x for x in list_assignments(track) if x["status"] != "Completed"]
+        seq = [{"name": f"📍 {track}", "lat": locrow["lat"], "lng": locrow["lng"]}]
+        remaining = []
+        if active:
+            astops = json.loads(active[0]["stops_json"])
+            remaining = [s for s in astops if not s.get("visited")]
+            if remaining:
+                pts = [(locrow["lat"], locrow["lng"])] + [(s["lat"], s["lng"]) for s in remaining]
+                res = optimize_open_route(pts, "time", DEFAULT_MAPBOX_TOKEN, 3)
+                if res and res["order"]:
+                    seq = []
+                    for ip in res["order"]:
+                        if ip == 0:
+                            seq.append({"name": f"📍 {track}", "lat": locrow["lat"], "lng": locrow["lng"]})
+                        else:
+                            s = remaining[ip - 1]
+                            seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
+            done = sum(1 for s in astops if s.get("visited"))
+            st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited · "
+                       f"remaining: {', '.join(s['name'] for s in remaining) or 'none'}")
+        tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height, open_route=True)
+        st_folium(tmap, width=800, height=map_height, key=f"track_map_{track}_{locrow['updated_at']}",
+                  returned_objects=[])
+
+
     rows = list_assignments()
     if not rows:
         st.caption("No itineraries yet.")
@@ -760,6 +892,7 @@ def sales_page():
             my_lng = float(loc["coords"]["longitude"])
             acc = loc["coords"].get("accuracy")
             my_loc = (my_lat, my_lng)
+            upsert_location(USER["name"], my_lat, my_lng)   # let admin track this rep
             st.info(f"📡 Location received: {my_lat:.5f}, {my_lng:.5f}"
                     + (f" (±{acc:.0f} m accuracy)" if acc else ""))
             changed = False
@@ -813,11 +946,43 @@ def sales_page():
         else:
             st.caption("All stops already checked in. 🎉")
 
-    full_seq = [depot_node()] + [{"name": s["name"], "lat": s["lat"], "lng": s["lng"]} for s in stops] + [depot_node()]
+    unvisited = [s for s in stops if not s.get("visited")]
     remarks_map = {s["name"]: s.get("remarks", "") for s in stops}
     arrived_map = {s["name"]: s.get("arrived_at") for s in stops if s.get("arrived_at")}
-    render_step_tracker(full_seq, "drv_step", DEFAULT_MAPBOX_TOKEN, 520,
-                        remarks_map, arrived_map, my_loc=my_loc)
+
+    st.divider()
+    if not unvisited:
+        st.success("🎉 All stops visited — itinerary complete!")
+    elif my_loc:
+        # Re-optimize the remaining stops starting from the rep's CURRENT location (open route).
+        pts = [(my_loc[0], my_loc[1])] + [(s["lat"], s["lng"]) for s in unvisited]
+        res = optimize_open_route(pts, "time", DEFAULT_MAPBOX_TOKEN, 3)
+        if res and res["order"]:
+            order = res["order"]
+            seq = []
+            for ip in order:
+                if ip == 0:
+                    seq.append({"name": "📍 You (current location)", "lat": my_loc[0], "lng": my_loc[1]})
+                else:
+                    s = unvisited[ip - 1]
+                    seq.append({"name": s["name"], "lat": s["lat"], "lng": s["lng"]})
+            durs, dists = res["durations"], res["distances"]
+            tot_t = sum(durs[x][y] for x, y in zip(order[:-1], order[1:]))
+            tot_d = sum(dists[x][y] for x, y in zip(order[:-1], order[1:]))
+            st.subheader("🧭 Live Route (from your location)")
+            st.caption(f"Re-routed from where you are now · {len(unvisited)} stops left · "
+                       f"{tot_d / 1000:.1f} km · ~{fmt_duration(tot_t)} remaining")
+            render_step_tracker(seq, "drv_step", DEFAULT_MAPBOX_TOKEN, 520,
+                                remarks_map, arrived_map, open_route=True)
+        else:
+            st.warning("Couldn't compute a live route right now — showing the planned order.")
+            full_seq = [depot_node()] + [{"name": s["name"], "lat": s["lat"], "lng": s["lng"]} for s in unvisited] + [depot_node()]
+            render_step_tracker(full_seq, "drv_step", DEFAULT_MAPBOX_TOKEN, 520, remarks_map, arrived_map)
+    else:
+        st.caption("Allow location above to get a live route from your position. "
+                   "Showing the planned order from base for now.")
+        full_seq = [depot_node()] + [{"name": s["name"], "lat": s["lat"], "lng": s["lng"]} for s in unvisited] + [depot_node()]
+        render_step_tracker(full_seq, "drv_step", DEFAULT_MAPBOX_TOKEN, 520, remarks_map, arrived_map)
 
     st.divider()
     st.subheader("✅ Visit Checklist")
