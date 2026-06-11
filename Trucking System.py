@@ -37,67 +37,50 @@ except Exception:
 # =============================================================================
 st.set_page_config(page_title="Cord Chemicals Field Sales", layout="wide")
 
-# ---- Modern, professional theme (fonts left untouched) ----------------------
+# ---- Modern, professional theme (adapts to Light/Dark; fonts left untouched) ----
 st.markdown("""
 <style>
-:root {
-    --cord-accent: #6A1B9A;
-    --cord-accent2: #2E7D32;
-    --cord-bg: #f6f7fb;
-}
-.stApp { background: var(--cord-bg); }
-section.main > div { padding-top: 0.5rem; }
+:root { --cord-accent: #8E24AA; }
 
-/* Buttons */
+/* Buttons — neutral text inherits the theme so it stays visible in light & dark */
 .stButton > button {
     border-radius: 12px;
-    border: 1px solid rgba(106,27,154,0.25);
+    border: 1px solid rgba(142,36,170,0.35);
     padding: 0.5rem 1rem;
     font-weight: 600;
     transition: all .15s ease;
-    box-shadow: 0 1px 2px rgba(16,24,40,0.06);
 }
 .stButton > button:hover {
     border-color: var(--cord-accent);
-    box-shadow: 0 4px 14px rgba(106,27,154,0.18);
+    box-shadow: 0 4px 14px rgba(142,36,170,0.22);
     transform: translateY(-1px);
 }
 .stButton > button[kind="primary"] {
     background: linear-gradient(135deg, #6A1B9A 0%, #8E24AA 100%);
-    border: none; color: #fff;
+    border: none; color: #ffffff;
 }
 
-/* Metric cards */
+/* Metric cards — translucent so they work on any theme background */
 [data-testid="stMetric"] {
-    background: #ffffff;
-    border: 1px solid #ececf3;
+    background: rgba(142,36,170,0.06);
+    border: 1px solid rgba(142,36,170,0.20);
     border-radius: 16px;
     padding: 16px 18px;
-    box-shadow: 0 2px 10px rgba(16,24,40,0.05);
 }
 [data-testid="stMetricValue"] { color: var(--cord-accent); }
 
-/* Bordered containers as cards */
+/* Bordered containers as soft cards */
 [data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 16px !important;
-    box-shadow: 0 2px 12px rgba(16,24,40,0.06);
 }
 
-/* Sidebar */
-[data-testid="stSidebar"] {
-    background: #ffffff;
-    border-right: 1px solid #ececf3;
-}
+/* Sidebar — keep a subtle divider, no forced colors */
+[data-testid="stSidebar"] { border-right: 1px solid rgba(142,36,170,0.18); }
 
-/* Headings */
 h1, h2, h3 { letter-spacing: .2px; }
-
-/* Inputs */
 [data-baseweb="input"] input, [data-baseweb="select"] { border-radius: 10px; }
-
-/* Dataframe / editor rounding */
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
-    border-radius: 12px; overflow: hidden; border: 1px solid #ececf3;
+    border-radius: 12px; overflow: hidden;
 }
 </style>
 """, unsafe_allow_html=True)
