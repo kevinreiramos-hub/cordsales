@@ -1,0 +1,811 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import folium
+import random
+import statistics
+import requests
+import sqlite3
+import hashlib
+import hmac
+import os
+import json
+import math
+import base64
+from datetime import date, datetime
+from streamlit_folium import st_folium
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
+
+# Optional browser geolocation component
+try:
+    from streamlit_geolocation import streamlit_geolocation
+    HAS_GEO = True
+except Exception:
+    HAS_GEO = False
+
+# =============================================================================
+# 1. CONFIG + CONSTANTS
+# =============================================================================
+st.set_page_config(page_title="Cord Chemicals Field Sales", layout="wide")
+
+DEPOT_NAME = "Cord Chemicals"
+DEPOT_LAT, DEPOT_LNG = 14.5844537, 121.0475689
+DEFAULT_MAPBOX_TOKEN = "pk.eyJ1Ijoia2V2aW5yZWkyIiwiYSI6ImNtcHl4ejY4ejA1ODYydHB2dDN3NXppcm0ifQ.Xpq-jmcdlyoVLCwDGulA4g"
+DB_PATH = "delivery_app.db"
+SECRET_KEY = "cord-chem-internal-secret-change-this"   # used to sign the stay-logged-in token
+GEOFENCE_M = 120                                        # auto check-in radius (meters)
+
+ACCOUNTS = pd.DataFrame({
+    "Account Name": [
+        "De Luxe Electrical & Hdwe. Supply",
+        "Firestone Trading",
+        "Fishermen Center",
+        "Jr Multi Business Resources, Inc.",
+        "Marswin Marketing Inc",
+        "Ace Hardware (SM Megamall)",
+        "Ace Hardware (Alabang)",
+    ],
+    "Address": [
+        "162 N Carpio St, Grace Park East, Caloocan, 1403 Metro Manila",
+        "415 San Nicolas St, San Nicolas, Manila, 1010 Metro Manila",
+        "823 Tetuan St, Santa Cruz, Manila, 1003 Metro Manila",
+        "111 Don Manuel Agregado Street, Quezon City, 1113 Metro Manila",
+        "408 San Nicolas St, San Nicolas, Manila, Metro Manila",
+        "202 EDSA cor. Dona Julia Vargas Ave, Mandaluyong City, 1550 Metro Manila",
+        "2nd Flr, Festival Mall, Zapote Wing, Corporate Ave, Alabang, Muntinlupa, 1770 Metro Manila",
+    ],
+    "Territory": ["Caloocan", "Manila", "Manila", "Quezon City", "Manila", "Mandaluyong", "Muntinlupa"],
+    "Latitude": [14.646187, 14.5999652, 14.6003507, 14.6315267, 14.6000217, 14.58631, 14.4189642],
+    "Longitude": [120.983901, 120.9702905, 120.977661, 121.001982, 120.9702217, 121.057465, 121.040753],
+})
+
+SALESPERSONS = ["Alex Colorito", "Ritchel Junio", "Jomer Lumauig"]
+
+# Seed users: (username, display name, role, password). Change passwords after first login.
+SEED_USERS = [
+    ("admin", "Brand Manager", "admin", "admin123"),
+    ("alex", "Alex Colorito", "sales", "sales123"),
+    ("ritchel", "Ritchel Junio", "sales", "sales123"),
+    ("jomer", "Jomer Lumauig", "sales", "sales123"),
+]
+
+# =============================================================================
+# 2. DATABASE LAYER  (SQLite now; swap DB_PATH/connection for Postgres later)
+# =============================================================================
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def hash_pw(password, salt=None):
+    if salt is None:
+        salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 100_000).hex()
+    return salt, digest
+
+
+def verify_pw(password, salt, digest):
+    check = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 100_000).hex()
+    return hmac.compare_digest(check, digest)
+
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY, name TEXT, role TEXT, salt TEXT, pwd TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_date TEXT, driver TEXT, truck TEXT, status TEXT,
+        stops_json TEXT, total_km REAL, time_str TEXT,
+        created_by TEXT, created_at TEXT)""")
+    # Ensure every seed account exists (creates missing ones like 'admin' on upgrade,
+    # without overwriting accounts/passwords that already exist).
+    for username, name, role, pw in SEED_USERS:
+        exists = cur.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone()
+        if not exists:
+            salt, digest = hash_pw(pw)
+            cur.execute("INSERT INTO users VALUES (?,?,?,?,?)", (username, name, role, salt, digest))
+    # Migrate old role names if upgrading from an earlier version
+    cur.execute("UPDATE users SET role='admin' WHERE role='dispatcher'")
+    cur.execute("UPDATE users SET role='sales' WHERE role='driver'")
+    conn.commit()
+    conn.close()
+
+
+def get_user(username):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_password(username, new_pw):
+    salt, digest = hash_pw(new_pw)
+    conn = get_conn()
+    conn.execute("UPDATE users SET salt=?, pwd=? WHERE username=?", (salt, digest, username))
+    conn.commit()
+    conn.close()
+
+
+def create_assignment(salesperson, stops, total_km, time_str, created_by):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO assignments
+        (run_date, driver, truck, status, stops_json, total_km, time_str, created_by, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (date.today().isoformat(), salesperson, "", "Assigned",
+         json.dumps(stops), total_km, time_str, created_by, datetime.now().isoformat(timespec="minutes")))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def list_assignments(salesperson=None):
+    conn = get_conn()
+    if salesperson:
+        rows = conn.execute("SELECT * FROM assignments WHERE driver=? ORDER BY run_date DESC, id DESC",
+                            (salesperson,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM assignments ORDER BY run_date DESC, id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_assignment(aid):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM assignments WHERE id=?", (aid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_assignment(aid, stops, status):
+    conn = get_conn()
+    conn.execute("UPDATE assignments SET stops_json=?, status=? WHERE id=?",
+                 (json.dumps(stops), status, aid))
+    conn.commit()
+    conn.close()
+
+
+def delete_assignment(aid):
+    conn = get_conn()
+    conn.execute("DELETE FROM assignments WHERE id=?", (aid,))
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+# =============================================================================
+# 3. STAY-LOGGED-IN TOKEN + AUTH GATE
+# =============================================================================
+def make_token(username):
+    sig = hmac.new(SECRET_KEY.encode(), username.encode(), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{username}:{sig}".encode()).decode()
+
+
+def verify_token(token):
+    try:
+        raw = base64.urlsafe_b64decode(token.encode()).decode()
+        username, sig = raw.rsplit(":", 1)
+        expect = hmac.new(SECRET_KEY.encode(), username.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(sig, expect):
+            return username
+    except Exception:
+        pass
+    return None
+
+
+if "auth" not in st.session_state:
+    st.session_state.auth = None
+
+# Restore session from the URL token so a page refresh does NOT log out.
+if st.session_state.auth is None:
+    tok = st.query_params.get("t")
+    if tok:
+        uname = verify_token(tok)
+        if uname:
+            rec = get_user(uname)
+            if rec:
+                st.session_state.auth = {"username": rec["username"], "name": rec["name"], "role": rec["role"]}
+
+if st.session_state.auth is None:
+    st.title("🔐 Cord Chemicals Field Sales — Sign in")
+    with st.form("login"):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        ok = st.form_submit_button("Sign in", type="primary")
+    if ok:
+        rec = get_user(u.strip().lower())
+        if rec and verify_pw(p, rec["salt"], rec["pwd"]):
+            st.session_state.auth = {"username": rec["username"], "name": rec["name"], "role": rec["role"]}
+            st.query_params["t"] = make_token(rec["username"])
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+    with st.expander("Demo accounts (change passwords after first login)"):
+        st.markdown(
+            "- **Admin (Brand Manager):** `admin` / `admin123`\n"
+            "- **Sales people:** `alex`, `ritchel`, `jomer` — all `sales123`"
+        )
+    st.stop()
+
+USER = st.session_state.auth
+
+# =============================================================================
+# 4. SHARED HELPER FUNCTIONS
+# =============================================================================
+def haversine_m(lat1, lng1, lat2, lng2):
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def haversine_matrix(coords):
+    rad = np.radians(np.asarray(coords, dtype=float))
+    lat = rad[:, 0][:, None]
+    lng = rad[:, 1][:, None]
+    dlat = lat - lat.T
+    dlng = lng - lng.T
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat) * np.cos(lat.T) * np.sin(dlng / 2.0) ** 2
+    c = 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    return 6371000.0 * c
+
+
+@st.cache_data(show_spinner=False)
+def get_mapbox_walk_matrices(coords_tuple, token):
+    """Mapbox walking Matrix API: walking duration (s) + distance (m). Up to 25 coordinates."""
+    coords = list(coords_tuple)
+    coord_str = ";".join(f"{lng},{lat}" for lat, lng in coords)
+    url = f"https://api.mapbox.com/directions-matrix/v1/mapbox/walking/{coord_str}"
+    params = {"annotations": "duration,distance", "access_token": token}
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("code") == "Ok":
+                return data.get("durations"), data.get("distances")
+    except Exception:
+        pass
+    return None, None
+
+
+@st.cache_data(show_spinner=False)
+def get_mapbox_walk_route(p_lat, p_lng, c_lat, c_lng, token):
+    """Mapbox walking Directions geometry for drawing the footpath."""
+    url = f"https://api.mapbox.com/directions/v5/mapbox/walking/{p_lng},{p_lat};{c_lng},{c_lat}"
+    params = {"geometries": "geojson", "overview": "full", "access_token": token}
+    try:
+        resp = requests.get(url, params=params, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("routes"):
+                coords = data["routes"][0]["geometry"]["coordinates"]
+                return [[c[1], c[0]] for c in coords]
+    except Exception:
+        pass
+    return None
+
+
+def fmt_duration(seconds):
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, _ = divmod(rem, 60)
+    if h:
+        return f"{h} h {m} min"
+    if m:
+        return f"{m} min"
+    return "<1 min"
+
+
+def route_totals(order, durations, distances):
+    tot_t = tot_d = 0.0
+    for a, b in zip(order[:-1], order[1:]):
+        tot_t += durations[a][b]
+        tot_d += distances[a][b]
+    return tot_t, tot_d
+
+
+# ---- AI itinerary comment ---------------------------------------------------
+def analyze_route(route_df, itinerary, distances, durations, territory_map):
+    stops = []
+    for pos, node in enumerate(itinerary):
+        if node == 0:
+            continue
+        prev_n, next_n = itinerary[pos - 1], itinerary[pos + 1]
+        depot_km = distances[0][node] / 1000.0
+        detour_km = max(0.0, (distances[prev_n][node] + distances[node][next_n]
+                              - distances[prev_n][next_n]) / 1000.0)
+        name = route_df.iloc[node]["Account Name"]
+        stops.append({"name": name, "territory": territory_map.get(name, "—"),
+                      "depot_km": depot_km, "detour_km": detour_km})
+    depot_kms = [s["depot_km"] for s in stops]
+    median_km = statistics.median(depot_kms) if depot_kms else 0.0
+    far_threshold = max(8.0, 2.2 * median_km)
+    detour_threshold = max(9.0, 2.5 * median_km)
+    outliers = []
+    for s in stops:
+        reasons = []
+        if s["depot_km"] > far_threshold:
+            reasons.append(f"{s['depot_km']:.0f} km from base")
+        if s["detour_km"] > detour_threshold:
+            reasons.append(f"adds a {s['detour_km']:.0f} km swing to the loop")
+        if reasons:
+            s["reasons"] = reasons
+            outliers.append(s)
+    groups = {}
+    for s in stops:
+        groups.setdefault(s["territory"], []).append(s["name"])
+    clusters = {t: names for t, names in groups.items() if len(names) >= 2}
+    return {"stops": stops, "outliers": outliers, "clusters": clusters, "median_km": median_km}
+
+
+def heuristic_comment(findings, num_stops, total_km, total_time_str):
+    r = random.Random()
+    parts = []
+    parts.append(r.choice([
+        f"Looking at this {num_stops}-stop itinerary ({total_km:.1f} km, about {total_time_str} on foot):",
+        f"Quick read on the {num_stops} calls you've lined up — roughly {total_km:.1f} km and ~{total_time_str} of walking:",
+        f"Here's how this {num_stops}-stop route shapes up — {total_km:.1f} km, around {total_time_str} on foot:",
+    ]))
+    outliers = findings["outliers"]
+    if outliers:
+        for o in outliers:
+            reason = " and ".join(o["reasons"])
+            same_area = findings["clusters"].get(o["territory"], [])
+            line = r.choice([
+                f"**{o['name']}** sits well off the cluster — it's {reason}. Unless it's urgent, consider moving it to a dedicated {o['territory']} day.",
+                f"**{o['name']}** is the odd one out ({reason}). I'd reschedule it for a day the rep is already working {o['territory']}.",
+                f"**{o['name']}** stretches the loop ({reason}). If the visit can wait, hold it for a {o['territory']}-focused trip.",
+            ])
+            if len(same_area) >= 2:
+                line += f" You'll be covering {o['territory']} anyway with {len(same_area)} accounts there, so the wait shouldn't cost a field day."
+            parts.append(line)
+    else:
+        parts.append(r.choice([
+            "Every stop is reasonably clustered — no obvious outlier to drop. Efficient as-is.",
+            "Nothing looks off-grid; the calls are close enough that the route is already tight.",
+        ]))
+    clusters = findings["clusters"]
+    if clusters:
+        biggest_t = max(clusters, key=lambda t: len(clusters[t]))
+        parts.append(r.choice([
+            f"You've got {len(clusters[biggest_t])} accounts in **{biggest_t}** — keep those back-to-back so the rep clears the area in one sweep.",
+            f"**{biggest_t}** has {len(clusters[biggest_t])} stops bunched together; visiting them consecutively is the easy win.",
+        ]))
+    parts.append(r.choice([
+        "Adjust the picking list and re-run to compare.",
+        "Tweak the stops and recalculate to test a leaner version.",
+        "Re-optimize after any change to see the new numbers.",
+    ]))
+    return "\n\n".join(parts)
+
+
+def call_anthropic(api_key, model, prompt):
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    body = {"model": model, "max_tokens": 450, "temperature": 1.0,
+            "messages": [{"role": "user", "content": prompt}]}
+    resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+
+
+def generate_ai_comment(findings, num_stops, total_km, total_time_str, ordered_names, api_key, model):
+    if api_key:
+        outlier_txt = "; ".join(f"{o['name']} ({', '.join(o['reasons'])})" for o in findings["outliers"]) or "none"
+        cluster_txt = "; ".join(f"{t}: {len(n)} stops" for t, n in findings["clusters"].items()) or "none"
+        flavor = random.choice(["concise", "practical", "candid", "encouraging", "no-nonsense"])
+        prompt = (
+            "You are a Metro Manila field-sales coordinator advising on one sales rep's walking itinerary. "
+            f"Write a {flavor} advisory of 90-140 words (plain text, no headers, no bullet symbols). "
+            "Flag any stop that is too far or off the grid for an efficient on-foot loop and recommend either "
+            "removing it today or rescheduling it to a day with other visits in the same area; "
+            "also note any area where stops cluster so they can be batched. Vary your wording naturally.\n\n"
+            f"Route order (after base): {', '.join(ordered_names)}\n"
+            f"Total: {total_km:.1f} km, ~{total_time_str} walking, {num_stops} stops.\n"
+            f"Flagged far/off-grid stops: {outlier_txt}\n"
+            f"Same-area clusters: {cluster_txt}\nBase: Cord Chemicals, Mandaluyong."
+        )
+        try:
+            text = call_anthropic(api_key, model, prompt)
+            if text:
+                return text
+        except Exception as e:
+            return heuristic_comment(findings, num_stops, total_km, total_time_str) + \
+                f"\n\n_(Live AI unavailable: {e} — showing the built-in analysis.)_"
+    return heuristic_comment(findings, num_stops, total_km, total_time_str)
+
+
+def optimize_walk_route(df, objective, mapbox_token, solver_seconds):
+    coords = [tuple(x) for x in df[["Latitude", "Longitude"]].values.tolist()]
+    durations = distances = None
+    source = None
+    if mapbox_token and len(coords) <= 25:
+        durations, distances = get_mapbox_walk_matrices(tuple(coords), mapbox_token)
+        if durations is not None:
+            source = "mapbox"
+    if durations is None:
+        hav = haversine_matrix(coords)
+        distances = hav.tolist()
+        durations = (hav / 1.39).tolist()   # ~5 km/h walking fallback
+        source = "fallback"
+
+    dur = np.array(durations, dtype=float)
+    dist = np.array(distances, dtype=float)
+    cost = dur if objective == "time" else dist
+    cost = np.nan_to_num(cost, nan=1e9, posinf=1e9)
+    matrix = np.round(cost).astype(int).tolist()
+
+    manager = pywrapcp.RoutingIndexManager(len(matrix), 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def cost_callback(from_index, to_index):
+        return matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+
+    transit_idx = routing.RegisterTransitCallback(cost_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(int(solver_seconds))
+    solution = routing.SolveWithParameters(params)
+    if not solution:
+        return None
+    order = []
+    index = routing.Start(0)
+    while not routing.IsEnd(index):
+        order.append(manager.IndexToNode(index))
+        index = solution.Value(routing.NextVar(index))
+    order.append(manager.IndexToNode(index))
+    return {"order": order, "durations": durations, "distances": distances, "source": source}
+
+
+# ---- Shared route map + step tracker ----------------------------------------
+def build_route_map(full_seq, current_idx, token, map_height, my_loc=None):
+    """full_seq: list of {name,lat,lng}; index 0 and last are the base."""
+    center = full_seq[current_idx]
+    if token:
+        tiles_url = ("https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/"
+                     f"{{z}}/{{x}}/{{y}}?access_token={token}")
+        m = folium.Map(location=[center["lat"], center["lng"]], zoom_start=14,
+                       tiles=tiles_url, attr="© Mapbox © OpenStreetMap")
+    else:
+        m = folium.Map(location=[center["lat"], center["lng"]], zoom_start=14)
+
+    base = full_seq[0]
+    folium.Marker([base["lat"], base["lng"]], popup=base["name"],
+                  icon=folium.Icon(color="black", icon="home")).add_to(m)
+
+    for i in range(1, current_idx + 1):
+        a, b = full_seq[i - 1], full_seq[i]
+        active = (i == current_idx)
+        pts = None
+        if token:
+            pts = get_mapbox_walk_route(a["lat"], a["lng"], b["lat"], b["lng"], token)
+        if not pts:
+            pts = [[a["lat"], a["lng"]], [b["lat"], b["lng"]]]
+        folium.PolyLine(pts, color="#6A1B9A" if active else "#9E86C9",
+                        weight=6 if active else 4, opacity=0.9 if active else 0.55,
+                        dash_array="1,8").add_to(m)   # dotted = footpath
+        last = (i == len(full_seq) - 1)
+        if last:
+            continue
+        if active:
+            folium.Marker([b["lat"], b["lng"]], popup=f"NEXT STOP:<br>{b['name']}",
+                          icon=folium.Icon(color="red", icon="flag")).add_to(m)
+        else:
+            folium.Marker([b["lat"], b["lng"]], popup=f"Visited:<br>{b['name']}",
+                          icon=folium.Icon(color="blue", icon="ok")).add_to(m)
+
+    if my_loc:
+        folium.Marker([my_loc[0], my_loc[1]], popup="You are here",
+                      icon=folium.Icon(color="green", icon="user")).add_to(m)
+        folium.Circle([my_loc[0], my_loc[1]], radius=GEOFENCE_M, color="#2E7D32",
+                      fill=True, fill_opacity=0.08).add_to(m)
+    return m
+
+
+def render_step_tracker(full_seq, step_key, token, map_height, remarks_map=None, arrived_map=None, my_loc=None):
+    remarks_map = remarks_map or {}
+    arrived_map = arrived_map or {}
+    last_pos = len(full_seq) - 1
+    num_stops = last_pos - 1
+
+    if step_key not in st.session_state:
+        st.session_state[step_key] = 1
+
+    c_prev, c_text, c_next = st.columns([1, 4, 1])
+    with c_prev:
+        if st.button("⬅️ Previous", disabled=(st.session_state[step_key] <= 1),
+                     use_container_width=True, key=f"{step_key}_prev"):
+            st.session_state[step_key] -= 1
+    with c_next:
+        if st.button("Next ➡️", disabled=(st.session_state[step_key] >= last_pos),
+                     use_container_width=True, key=f"{step_key}_next"):
+            st.session_state[step_key] += 1
+
+    cur = max(1, min(st.session_state[step_key], last_pos))
+    st.session_state[step_key] = cur
+    dest = full_seq[cur]
+
+    with c_text:
+        if cur == last_pos:
+            st.markdown(f"<h3 style='text-align:center;color:#6A1B9A;'>🏁 Back to Base: {dest['name']}</h3>",
+                        unsafe_allow_html=True)
+        else:
+            st.markdown(f"<h3 style='text-align:center;color:#6A1B9A;'>Stop {cur} of {num_stops}: {dest['name']}</h3>",
+                        unsafe_allow_html=True)
+            rmk = remarks_map.get(dest["name"], "")
+            if rmk:
+                st.markdown(f"<p style='text-align:center;'><i>Remarks: {rmk}</i></p>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.markdown("### 🗺️ Itinerary")
+        st.markdown(f"🚩 **Start:** {full_seq[0]['name']}")
+        for step in range(1, len(full_seq)):
+            name = full_seq[step]["name"]
+            stamp = arrived_map.get(name)
+            if step == last_pos:
+                st.markdown(f"{'✅' if cur >= last_pos else '🏁'} **Back to Base:** {name}")
+            elif stamp:
+                st.markdown(f"✅ **Stop {step}:** ~~{name}~~ — *{stamp}*")
+            elif step == cur:
+                st.markdown(f"🎯 **Stop {step}: {name}**")
+            else:
+                st.markdown(f"⏳ **Stop {step}:** {name}")
+    with col2:
+        m = build_route_map(full_seq, cur, token, map_height, my_loc=my_loc)
+        st_folium(m, width=800, height=map_height, key=f"{step_key}_map_{cur}", returned_objects=[])
+    st.caption("Purple dotted line = walking path. 🟢 Green marker = the rep's live GPS position.")
+
+
+def depot_node():
+    return {"name": DEPOT_NAME, "lat": DEPOT_LAT, "lng": DEPOT_LNG}
+
+# =============================================================================
+# 5. SIDEBAR (account)
+# =============================================================================
+with st.sidebar:
+    role_label = "Admin (Brand Manager)" if USER["role"] in ("admin", "dispatcher") else "Sales Person"
+    st.markdown(f"**Signed in:** {USER['name']}  \n*{role_label}*")
+    if st.button("Log out", use_container_width=True):
+        st.session_state.auth = None
+        if "t" in st.query_params:
+            del st.query_params["t"]
+        st.rerun()
+    with st.expander("Change my password"):
+        np1 = st.text_input("New password", type="password", key="np1")
+        np2 = st.text_input("Confirm", type="password", key="np2")
+        if st.button("Update password"):
+            if np1 and np1 == np2:
+                set_password(USER["username"], np1)
+                st.success("Password updated.")
+            else:
+                st.error("Passwords are empty or don't match.")
+    st.divider()
+
+
+# =============================================================================
+# 6. ADMIN (BRAND MANAGER) DASHBOARD
+# =============================================================================
+def admin_page():
+    st.title("🧭 Admin Dashboard — Plan & Assign Field Itineraries")
+
+    with st.sidebar:
+        st.header("⚙️ Itinerary Setup")
+        salesperson = st.selectbox("Sales Person", options=SALESPERSONS)
+
+        st.subheader("📍 Picking Locations")
+        selected_names = st.multiselect("Select accounts to visit",
+                                        options=ACCOUNTS["Account Name"].tolist())
+
+        st.divider()
+        st.subheader("🚶 Optimization (walking)")
+        objective_label = st.radio("Optimize for", ["Fastest time (recommended)", "Shortest distance"])
+        objective = "time" if objective_label.startswith("Fastest") else "distance"
+        solver_seconds = st.slider("Solver effort (seconds)", 1, 15, 3)
+
+        st.subheader("🗺️ Map")
+        map_height = st.slider("Map height (px)", 400, 800, 520, step=20)
+
+        st.subheader("🤖 AI Assistant")
+        ai_api_key = st.text_input("Anthropic API key (optional)", type="password")
+        with st.expander("Advanced"):
+            mapbox_token = st.text_input("Mapbox token", value=DEFAULT_MAPBOX_TOKEN, type="password")
+            ai_model = st.text_input("AI model", value="claude-sonnet-4-6")
+
+    if "remarks" not in st.session_state:
+        st.session_state.remarks = {}
+
+    st.subheader("📋 Visit Manifest")
+    st.caption(f"Sales Person: **{salesperson}**  |  Base: **{DEPOT_NAME}**")
+    picked = ACCOUNTS[ACCOUNTS["Account Name"].isin(selected_names)].reset_index(drop=True)
+
+    if picked.empty:
+        st.info("👈 Use **Picking Locations** in the sidebar to add accounts.")
+    else:
+        disp = picked[["Account Name", "Address", "Territory"]].copy()
+        disp.insert(0, "No", range(1, len(disp) + 1))
+        disp["Remarks"] = [st.session_state.remarks.get(n, "") for n in disp["Account Name"]]
+        edited = st.data_editor(disp, hide_index=True, num_rows="fixed", use_container_width=True,
+                                disabled=["No", "Account Name", "Address", "Territory"],
+                                column_config={"No": st.column_config.NumberColumn("No #", width="small"),
+                                               "Remarks": st.column_config.TextColumn("Remarks")},
+                                key="manifest_table")
+        for _, row in edited.iterrows():
+            st.session_state.remarks[row["Account Name"]] = row["Remarks"]
+
+    if st.button("⚡ Calculate Optimal Walking Route", type="primary", disabled=picked.empty):
+        base_row = pd.DataFrame([{"Account Name": DEPOT_NAME, "Latitude": DEPOT_LAT, "Longitude": DEPOT_LNG}])
+        stops = picked[["Account Name", "Latitude", "Longitude"]]
+        route_df = pd.concat([base_row, stops]).reset_index(drop=True)
+        with st.spinner("Fetching walking times and optimizing..."):
+            result = optimize_walk_route(route_df, objective, mapbox_token, solver_seconds)
+        if result:
+            order = result["order"]
+            ordered = [{"name": route_df.iloc[n]["Account Name"],
+                        "lat": float(route_df.iloc[n]["Latitude"]),
+                        "lng": float(route_df.iloc[n]["Longitude"])} for n in order[1:-1]]
+            t_time, t_dist = route_totals(order, result["durations"], result["distances"])
+            terr = dict(zip(ACCOUNTS["Account Name"], ACCOUNTS["Territory"]))
+            findings = analyze_route(route_df, order, result["distances"], result["durations"], terr)
+            st.session_state.disp_route = {
+                "ordered": ordered, "salesperson": salesperson,
+                "total_km": t_dist / 1000.0, "time_str": fmt_duration(t_time),
+                "source": result["source"],
+            }
+            st.session_state.disp_step = 1
+            st.session_state.disp_ai = generate_ai_comment(
+                findings, len(ordered), t_dist / 1000.0, fmt_duration(t_time),
+                [s["name"] for s in ordered], ai_api_key, ai_model)
+            if result["source"] == "mapbox":
+                st.success("✅ Walking route calculated via 🚶 **Mapbox**.")
+            else:
+                st.warning("⚠️ Couldn't reach Mapbox — used straight-line **offline estimates**.")
+        else:
+            st.error("No solution found.")
+
+    route = st.session_state.get("disp_route")
+    if route:
+        st.divider()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Stops", len(route["ordered"]))
+        m2.metric("Walking distance", f"{route['total_km']:.1f} km")
+        m3.metric("Est. walking time", route["time_str"])
+        src = "🚶 Mapbox walking" if route["source"] == "mapbox" else "⚠️ offline estimate"
+        st.caption(f"Routing source used: {src}")
+
+        if st.session_state.get("disp_ai"):
+            with st.container(border=True):
+                st.markdown("#### 🤖 AI Itinerary Comment")
+                st.markdown(st.session_state.disp_ai)
+
+        full_seq = [depot_node()] + route["ordered"] + [depot_node()]
+        render_step_tracker(full_seq, "disp_step", DEFAULT_MAPBOX_TOKEN, map_height,
+                            st.session_state.get("remarks", {}))
+
+        st.divider()
+        if st.button(f"📌 Assign this itinerary to {route['salesperson']}", type="primary"):
+            stops_payload = [{"name": s["name"], "lat": s["lat"], "lng": s["lng"],
+                              "remarks": st.session_state.get("remarks", {}).get(s["name"], ""),
+                              "visited": False, "arrived_at": None} for s in route["ordered"]]
+            aid = create_assignment(route["salesperson"], stops_payload,
+                                    route["total_km"], route["time_str"], USER["name"])
+            st.success(f"Assigned to {route['salesperson']} (itinerary #{aid}). It now shows on their account.")
+
+    st.divider()
+    st.subheader("📑 All Itineraries & GPS Check-ins")
+    rows = list_assignments()
+    if not rows:
+        st.caption("No itineraries yet.")
+    for a in rows:
+        stops = json.loads(a["stops_json"])
+        done = sum(1 for s in stops if s.get("visited"))
+        with st.expander(f"#{a['id']} · {a['run_date']} · {a['driver']} · {a['status']} · {done}/{len(stops)} visited"):
+            st.caption(f"{a['total_km']:.1f} km · ~{a['time_str']} walking · assigned by {a['created_by']}")
+            for i, s in enumerate(stops, 1):
+                if s.get("arrived_at"):
+                    st.markdown(f"✅ **{i}. {s['name']}** — arrived **{s['arrived_at']}**")
+                else:
+                    st.markdown(f"⏳ **{i}. {s['name']}** — not yet visited")
+            if st.button("Delete", key=f"del_{a['id']}"):
+                delete_assignment(a["id"])
+                st.rerun()
+
+
+# =============================================================================
+# 7. SALES PERSON DASHBOARD
+# =============================================================================
+def sales_page():
+    st.title(f"🚶 {USER['name']} — My Itinerary")
+    mine = list_assignments(salesperson=USER["name"])
+    if not mine:
+        st.info("No itinerary assigned to you yet. Your brand manager will assign one.")
+        return
+
+    labels = {f"#{a['id']} · {a['run_date']} · {a['status']}": a["id"] for a in mine}
+    choice = st.selectbox("Choose an itinerary", options=list(labels.keys()))
+    aid = labels[choice]
+
+    if st.session_state.get("drv_current_aid") != aid:
+        st.session_state.drv_current_aid = aid
+        st.session_state.drv_step = 1
+
+    a = get_assignment(aid)
+    stops = json.loads(a["stops_json"])
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Stops", len(stops))
+    m2.metric("Walking distance", f"{a['total_km']:.1f} km")
+    m3.metric("Est. walking time", a["time_str"])
+    st.caption(f"Status: **{a['status']}**  ·  Base: **{DEPOT_NAME}**")
+
+    # ---- GPS check-in -------------------------------------------------------
+    st.subheader("📍 GPS Check-in")
+    my_loc = None
+    if HAS_GEO:
+        st.caption("Tap the location icon when you arrive. If you're within "
+                   f"{GEOFENCE_M} m of a stop, your arrival time is recorded automatically.")
+        loc = streamlit_geolocation()
+        if loc and loc.get("latitude") is not None:
+            my_lat, my_lng = float(loc["latitude"]), float(loc["longitude"])
+            my_loc = (my_lat, my_lng)
+            changed = False
+            for s in stops:
+                if not s.get("visited"):
+                    d = haversine_m(my_lat, my_lng, s["lat"], s["lng"])
+                    if d <= GEOFENCE_M:
+                        s["visited"] = True
+                        s["arrived_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        changed = True
+                        st.success(f"📍 Checked in at {s['name']} ({d:.0f} m away).")
+            if changed:
+                status = "Completed" if all(s.get("visited") for s in stops) else "In progress"
+                update_assignment(aid, stops, status)
+                st.rerun()
+    else:
+        st.warning("GPS component not installed. Run: `pip install streamlit-geolocation` "
+                   "to enable automatic check-ins. You can still mark stops manually below.")
+
+    full_seq = [depot_node()] + [{"name": s["name"], "lat": s["lat"], "lng": s["lng"]} for s in stops] + [depot_node()]
+    remarks_map = {s["name"]: s.get("remarks", "") for s in stops}
+    arrived_map = {s["name"]: s.get("arrived_at") for s in stops if s.get("arrived_at")}
+    render_step_tracker(full_seq, "drv_step", DEFAULT_MAPBOX_TOKEN, 520,
+                        remarks_map, arrived_map, my_loc=my_loc)
+
+    st.divider()
+    st.subheader("✅ Visit Checklist")
+    st.caption("GPS records arrivals automatically; you can also tick a stop here if needed.")
+    new_flags = []
+    for i, s in enumerate(stops):
+        stamp = f"  —  arrived {s['arrived_at']}" if s.get("arrived_at") else ""
+        rmk = f"  ·  _{s['remarks']}_" if s.get("remarks") else ""
+        new_flags.append(st.checkbox(f"{i + 1}. {s['name']}{stamp}{rmk}",
+                                     value=s.get("visited", False), key=f"chk_{aid}_{i}"))
+    if st.button("💾 Save progress", type="primary"):
+        for s, flag in zip(stops, new_flags):
+            if flag and not s.get("visited"):
+                s["arrived_at"] = s.get("arrived_at") or datetime.now().strftime("%Y-%m-%d %H:%M")
+            s["visited"] = flag
+            if not flag:
+                s["arrived_at"] = None
+        status = "Completed" if all(s["visited"] for s in stops) else \
+                 ("In progress" if any(s["visited"] for s in stops) else "Assigned")
+        update_assignment(aid, stops, status)
+        st.success(f"Saved. Status: {status}.")
+        st.rerun()
+
+
+# Route to the correct dashboard by role
+if USER["role"] in ("admin", "dispatcher"):
+    admin_page()
+else:
+    sales_page()
