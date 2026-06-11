@@ -1149,16 +1149,44 @@ def _status_text(person=None):
     return "\n".join(lines)
 
 
-def _propose_assignment(text, person, terr, n):
-    """Existing behavior: plan the nearest N accounts in a territory from the rep's live location."""
+def _word_to_int(token):
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+             "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+    token = token.lower()
+    return int(token) if token.isdigit() else words.get(token, 1)
+
+
+def _parse_requests(text):
+    """Parse one or more 'count + territory' pairs, e.g. 'give 3 manila and 1 caloocan'.
+    Returns an ordered dict-like list of (territory, count)."""
+    t = text.lower()
+    territories = list(dict.fromkeys(ACCOUNTS["Territory"].tolist()))
+    num = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+    reqs = {}
+    positions = {}
+    for terr in territories:
+        tl = re.escape(terr.lower())
+        # a number up to a few words before the territory name → that count
+        m = re.search(num + r"\b[\s\w]{0,12}?\b" + tl + r"\b", t)
+        if m:
+            reqs[terr] = _word_to_int(m.group(1))
+            positions[terr] = m.start()
+        elif re.search(r"\b" + tl + r"\b", t):
+            reqs[terr] = 1
+            positions[terr] = t.find(terr.lower())
+    # keep the order they were mentioned in the sentence
+    return [(terr, reqs[terr]) for terr in sorted(reqs, key=lambda k: positions[k])]
+
+
+def _propose_assignment(text, person, reqs):
+    """Plan the nearest accounts for one or more territory+count requests, from the rep's live location."""
     territories = list(dict.fromkeys(ACCOUNTS["Territory"].tolist()))
     if not person:
         return ("Which sales person? For example: *“Give 2 Manila to Alex”*. "
                 f"Options: {', '.join(SALESPERSONS)}.", None)
-    if not terr:
+    if not reqs:
         return (f"Which territory should I use for {person.split()[0]}? "
                 f"Options: {', '.join(territories)}.", None)
-    n = n or 1
 
     # Step 1 — find the rep's live location first
     loc = get_location(person)
@@ -1172,40 +1200,51 @@ def _propose_assignment(text, person, terr, n):
         origin_desc = (f"I don't have a live GPS fix for **{person}** yet, so I planned from the base "
                        f"(**{DEPOT_NAME}**). Ask them to open their app and share location for a location-based plan")
 
-    # Step 2 — candidates in that territory, nearest to the origin
-    cands = ACCOUNTS[ACCOUNTS["Territory"].str.lower() == terr.lower()].copy()
-    if cands.empty:
-        return (f"There are no accounts in **{terr}**.", None)
-    cands["dist"] = [haversine_m(origin[0], origin[1], r["Latitude"], r["Longitude"])
-                     for _, r in cands.iterrows()]
-    cands = cands.sort_values("dist")
-    if len(cands) < n:
-        note = f"Only {len(cands)} account(s) exist in {terr}, so I used all of them. "
-        n = len(cands)
-    else:
-        note = ""
-    chosen = cands.head(n)
+    # Step 2 — for each requested territory, take the nearest N to the origin
+    chosen_rows = []
+    detail_lines = []
+    used_names = set()
+    for terr, count in reqs:
+        cands = ACCOUNTS[ACCOUNTS["Territory"].str.lower() == terr.lower()].copy()
+        if cands.empty:
+            detail_lines.append(f"- _{terr}: no accounts available_")
+            continue
+        cands["dist"] = [haversine_m(origin[0], origin[1], r["Latitude"], r["Longitude"])
+                         for _, r in cands.iterrows()]
+        cands = cands[~cands["Account Name"].isin(used_names)].sort_values("dist")
+        take = min(count, len(cands))
+        picked = cands.head(take)
+        if take < count:
+            detail_lines.append(f"- **{terr}** (asked {count}, only {take} available):")
+        else:
+            detail_lines.append(f"- **{terr}** ({take}):")
+        for _, r in picked.iterrows():
+            detail_lines.append(f"    • {r['Account Name']} — {r['dist'] / 1000:.1f} km")
+            used_names.add(r["Account Name"])
+            chosen_rows.append(r)
 
-    # Step 3 — optimize the walking order from the rep's location
-    pts = [origin] + [(r["Latitude"], r["Longitude"]) for _, r in chosen.iterrows()]
+    if not chosen_rows:
+        return ("I couldn't find any matching accounts for that request.", None)
+
+    # Step 3 — optimize one walking route through everything, from the rep's location
+    pts = [origin] + [(r["Latitude"], r["Longitude"]) for r in chosen_rows]
     res = optimize_open_route(pts, "time", DEFAULT_MAPBOX_TOKEN, 3)
     order = res["order"] if res else list(range(len(pts)))
     ordered = []
     for ip in order:
         if ip == 0:
             continue
-        r = chosen.iloc[ip - 1]
+        r = chosen_rows[ip - 1]
         ordered.append({"name": r["Account Name"], "lat": float(r["Latitude"]),
                         "lng": float(r["Longitude"]), "address": r["Address"]})
     durs, dists = res["durations"], res["distances"]
     tot_t = sum(durs[x][y] for x, y in zip(order[:-1], order[1:]))
     tot_d = sum(dists[x][y] for x, y in zip(order[:-1], order[1:]))
 
-    lines = [f"{origin_desc}.", f"\nNearest **{n}** {terr} account(s):"]
-    for _, r in chosen.iterrows():
-        lines.append(f"- **{r['Account Name']}** — {r['dist'] / 1000:.1f} km away")
+    lines = [f"{origin_desc}.", f"\nSelected **{len(ordered)}** account(s):"]
+    lines.extend(detail_lines)
     lines.append(f"\nOptimized walking route: **{tot_d / 1000:.1f} km · ~{fmt_duration(tot_t)}**.")
-    lines.append(f"{note}Review the map below and assign it to {person.split()[0]} if it looks good.")
+    lines.append(f"Review the map below and assign it to {person.split()[0]} if it looks good.")
 
     proposal = {"salesperson": person, "origin": origin, "origin_name": origin_name,
                 "ordered": ordered, "total_km": tot_d / 1000.0, "time_str": fmt_duration(tot_t)}
@@ -1218,7 +1257,6 @@ def process_command(text):
     t = text.lower()
     person = _find_person(text)
     terr = _find_territory(text)
-    n = _parse_count(text)
 
     # --- Informational queries (no sales person being assigned) ---
     if "help" in t or "what can you" in t:
@@ -1239,9 +1277,10 @@ def process_command(text):
     if "account" in t and person is None and not _is_assign(t):
         return (_account_list_text(terr), None)
 
-    # --- Assignment intent ---
+    # --- Assignment intent (supports compound requests like '3 Manila and 1 Caloocan') ---
     if person or (_is_assign(t) and terr):
-        return _propose_assignment(text, person, terr, n)
+        reqs = _parse_requests(text)
+        return _propose_assignment(text, person, reqs)
 
     # Plain rep name → show their status
     if person:
