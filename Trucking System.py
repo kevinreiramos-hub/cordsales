@@ -552,9 +552,12 @@ def optimize_walk_route(df, objective, mapbox_token, solver_seconds):
 
 
 # ---- Shared route map + step tracker ----------------------------------------
-def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
+def build_route_map(full_seq, current_idx, token, map_height, open_route=False, highlight_idx=None):
     """full_seq: list of {name,lat,lng}. For a closed route, index 0 and last are the base.
-    For an open route, index 0 is the rep's current location and the last node is a real stop."""
+    For an open route, index 0 is the rep's current location and the last node is a real stop.
+    highlight_idx: which stop to emphasize as the immediate next destination (defaults to current_idx)."""
+    if highlight_idx is None:
+        highlight_idx = current_idx
     center = full_seq[current_idx]
     if token:
         tiles_url = ("https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/"
@@ -577,7 +580,7 @@ def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
 
     for i in range(1, current_idx + 1):
         a, b = full_seq[i - 1], full_seq[i]
-        active = (i == current_idx)
+        active = (i == highlight_idx)
         pts = None
         if token:
             pts = get_mapbox_walk_route(a["lat"], a["lng"], b["lat"], b["lng"], token)
@@ -590,11 +593,16 @@ def build_route_map(full_seq, current_idx, token, map_height, open_route=False):
         last = (i == len(full_seq) - 1)
         if last and not open_route:
             continue  # closed route: last node is the depot, already pinned
+        order_no = i  # stop's position in the sequence
         if active:
-            folium.Marker([b["lat"], b["lng"]], popup=f"NEXT STOP:<br>{b['name']}",
+            folium.Marker([b["lat"], b["lng"]],
+                          popup=f"GO HERE NEXT (stop {order_no}):<br>{b['name']}",
+                          tooltip=f"➡️ {order_no}. {b['name']}",
                           icon=folium.Icon(color="red", icon="flag")).add_to(m)
         else:
-            folium.Marker([b["lat"], b["lng"]], popup=f"Stop:<br>{b['name']}",
+            folium.Marker([b["lat"], b["lng"]],
+                          popup=f"Stop {order_no}:<br>{b['name']}",
+                          tooltip=f"{order_no}. {b['name']}",
                           icon=folium.Icon(color="blue", icon="ok")).add_to(m)
 
     # Auto-zoom so the whole visible path fits the screen (works on any phone size).
@@ -894,7 +902,8 @@ def admin_tracking():
         done = sum(1 for s in astops if s.get("visited"))
         st.caption(f"Itinerary #{active[0]['id']}: {done}/{len(astops)} visited · "
                    f"remaining: {', '.join(s['name'] for s in remaining) or 'none'}")
-    tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height, open_route=True)
+    tmap = build_route_map(seq, len(seq) - 1, DEFAULT_MAPBOX_TOKEN, map_height,
+                           open_route=True, highlight_idx=1)
     st_folium(tmap, width=None, height=map_height, use_container_width=True,
               key=f"track_map_{track}_{locrow['updated_at']}", returned_objects=[])
 
